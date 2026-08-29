@@ -1,0 +1,11 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "claims_triage": "./src/agents/claims_triage_team.py:default_claims_triage_graph",
+    "code_review": "./src/agents/code_review_team.py:default_code_review_graph",
+    "solution_review": "./src/agents/solution_review_team.py:default_solution_review_graph",
+    "supervisor": "./src/agents/multi_agent_supervisor.py:default_supervisor_graph",
+    "master_pipeline": "./src/agents/master_pipeline.py:default_master_graph"
+  },
+  "env": ".env"
+}

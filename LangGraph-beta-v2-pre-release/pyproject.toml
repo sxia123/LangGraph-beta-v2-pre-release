@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langgraph-python"
+version = "1.0.0"
+description = "Stateful Multi-Agent Local Model Framework in Python using LangGraph"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain-core>=0.2.0",
+    "requests>=2.31.0",
+    "pydantic>=2.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pyright]
+extraPaths = ["."]
+executionEnvironments = [
+  { root = "." }
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+

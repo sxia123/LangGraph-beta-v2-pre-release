@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qwen Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="chatgpt-layout" id="appLayout">
+    <!-- COLLAPSIBLE SIDEBAR -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <button class="sidebar-action-btn" id="newChatBtn" title="New Chat (Ctrl+K)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          <span>New chat</span>
+        </button>
+        <button class="sidebar-icon-btn" id="collapseSidebarBtn" title="Close sidebar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <line x1="9" y1="3" x2="9" y2="21"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- CHAT SESSIONS / RUNS LIST -->
+      <div class="sidebar-history-container">
+        <div class="history-section-label">Recent Chats</div>
+        <div class="history-list" id="historyList">
+          <!-- Session items dynamically injected -->
+          <div class="history-empty">No previous chats</div>
+        </div>
+      </div>
+
+      <!-- SIDEBAR FOOTER (Memory Manager & Status) -->
+      <div class="sidebar-footer">
+        <button class="sidebar-nav-item" id="openMemoryModalBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a4 4 0 0 1 4 4c0 1.1-.5 2.1-1.2 2.8L12 11l-2.8-2.2A4 4 0 0 1 12 2z"/>
+            <path d="M4.2 10.2a8 8 0 1 0 15.6 0"/>
+            <path d="M12 11v11"/>
+          </svg>
+          <span class="nav-label">Manage Memory</span>
+          <span class="memory-badge" id="memoryBadge">0</span>
+        </button>
+
+        <div class="sidebar-status-card" id="statusCard">
+          <div class="status-indicator">
+            <span class="status-bullet" id="statusBullet"></span>
+            <span class="status-title" id="statusTitle">Checking oMLX...</span>
+          </div>
+          <div class="status-details" id="statusDetails">Qwen3.8-27B-oQ6-mtp</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN CHAT CONTAINER -->
+    <div class="main-content">
+      <!-- TOP NAVIGATION BAR -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="topbar-icon-btn" id="expandSidebarBtn" title="Open sidebar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <line x1="9" y1="3" x2="9" y2="21"/>
+            </svg>
+          </button>
+          
+          <!-- MODEL SELECTOR DROPDOWN -->
+          <div class="dropdown-wrapper">
+            <button class="model-select-btn" id="modelSelectBtn">
+              <span class="model-name" id="currentModelLabel">Qwen 3.8 27B</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </button>
+            <div class="dropdown-menu" id="modelDropdownMenu">
+              <div class="dropdown-header">Model Selection</div>
+              <button class="dropdown-item active" data-model="Qwen3.8-27B-oQ6-mtp">
+                <div class="item-title">Qwen 3.8 27B (Default)</div>
+                <div class="item-desc">High-capability reasoning & language</div>
+              </button>
+              <button class="dropdown-item" data-model="Qwen2.5-VL-72B-Instruct">
+                <div class="item-title">Qwen 2.5 VL 72B</div>
+                <div class="item-desc">Advanced multimodal vision & analysis</div>
+              </button>
+              <button class="dropdown-item" data-model="Qwen2.5-VL-7B-Instruct">
+                <div class="item-title">Qwen 2.5 VL 7B</div>
+                <div class="item-desc">Fast multimodal vision processing</div>
+              </button>
+              <button class="dropdown-item" data-model="Qwen2.5-Coder-32B-Instruct">
+                <div class="item-title">Qwen 2.5 Coder 32B</div>
+                <div class="item-desc">Code generation & technical tasks</div>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="topbar-right">
+          <!-- PIPELINE SELECTOR DROPDOWN -->
+          <div class="dropdown-wrapper">
+            <button class="control-btn" id="pipelineSelectBtn" title="Select workflow pipeline">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 18 22 12 16 6"></polyline>
+                <polyline points="8 6 2 12 8 18"></polyline>
+              </svg>
+              <span id="currentPipelineLabel">Direct Chat / Vision</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </button>
+            <div class="dropdown-menu dropdown-right" id="pipelineDropdownMenu">
+              <div class="dropdown-header">Workflow Pipeline</div>
+              <button class="dropdown-item active" data-pipeline="direct">
+                <div class="item-title">Direct Chat / Vision</div>
+                <div class="item-desc">Direct multimodal conversation with Qwen</div>
+              </button>
+              <button class="dropdown-item" data-pipeline="master">
+                <div class="item-title">Master Pipeline</div>
+                <div class="item-desc">Triage → Supervisor → Review</div>
+              </button>
+              <button class="dropdown-item" data-pipeline="supervisor">
+                <div class="item-title">Multi-Agent Supervisor</div>
+                <div class="item-desc">Researcher + Coder + Critic loop</div>
+              </button>
+              <button class="dropdown-item" data-pipeline="code_review">
+                <div class="item-title">Code Review Team</div>
+                <div class="item-desc">Developer + Quality Auditor</div>
+              </button>
+              <button class="dropdown-item" data-pipeline="claims_triage">
+                <div class="item-title">Claims & Triage</div>
+                <div class="item-desc">Classifier + Severity triage</div>
+              </button>
+              <button class="dropdown-item" data-pipeline="chart">
+                <div class="item-title">Chart Architecture</div>
+                <div class="item-desc">Intake → Specialist → Escalation</div>
+              </button>
+            </div>
+          </div>
+
+          <!-- PERSISTENT MEMORY TOGGLE -->
+          <button class="control-btn toggle-btn active" id="memoryToggleBtn" title="Toggle Persistent Memory Context">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a4 4 0 0 1 4 4c0 1.1-.5 2.1-1.2 2.8L12 11l-2.8-2.2A4 4 0 0 1 12 2z"/>
+              <path d="M4.2 10.2a8 8 0 1 0 15.6 0"/>
+            </svg>
+            <span id="memoryToggleLabel">Memory: On</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- CHAT VIEWPORT -->
+      <main class="chat-viewport" id="chatViewport">
+        <div class="chat-thread" id="chatThread">
+          <!-- WELCOME STATE -->
+          <div class="empty-state" id="emptyState">
+            <div class="empty-logo">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+              </svg>
+            </div>
+            <h2>What can I help with?</h2>
+            <div class="prompt-suggestions">
+              <button class="suggestion-card" data-prompt="Analyze this image in detail and describe what is happening.">
+                <div class="card-title">Analyze visual content</div>
+                <div class="card-subtitle">Attach an image or paste a screenshot</div>
+              </button>
+              <button class="suggestion-card" data-prompt="Write a Python script to asynchronously scrape and parse structured data from a list of URLs.">
+                <div class="card-title">Write Python code</div>
+                <div class="card-subtitle">Clean async architecture with type hints</div>
+              </button>
+              <button class="suggestion-card" data-prompt="Review this business proposal and point out edge cases or financial liabilities.">
+                <div class="card-title">Audit a proposal</div>
+                <div class="card-subtitle">Multi-agent evaluation & verification</div>
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- FLOATING INPUT CONTAINER -->
+      <footer class="input-container-wrapper">
+        <div class="input-container" id="inputContainer">
+          <!-- STAGED IMAGE ATTACHMENTS TRAY -->
+          <div class="image-staging-tray" id="imageStagingTray"></div>
+
+          <!-- INPUT FORM -->
+          <form class="chat-input-form" id="chatForm">
+            <input type="file" id="fileInput" multiple accept="image/*" style="display: none;">
+            
+            <button type="button" class="attach-btn" id="attachBtn" title="Attach images or drop files">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </button>
+
+            <textarea
+              id="chatTextarea"
+              class="chat-textarea"
+              placeholder="Message Qwen..."
+              rows="1"
+            ></textarea>
+
+            <button type="submit" class="send-btn" id="sendBtn" disabled title="Send message">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="19" x2="12" y2="5"></line>
+                <polyline points="5 12 12 5 19 12"></polyline>
+              </svg>
+            </button>
+          </form>
+        </div>
+        <div class="input-disclaimer">
+          Qwen local model running via oMLX. Check important info.
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- DRAG AND DROP FULLSCREEN OVERLAY -->
+  <div class="drag-drop-overlay" id="dragDropOverlay">
+    <div class="drag-drop-box">
+      <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        <circle cx="8.5" cy="8.5" r="1.5"/>
+        <polyline points="21 15 16 10 5 21"/>
+      </svg>
+      <div class="drag-drop-text">Drop images here for Qwen intake</div>
+    </div>
+  </div>
+
+  <!-- IMAGE LIGHTBOX MODAL -->
+  <div class="lightbox-modal" id="lightboxModal">
+    <div class="lightbox-backdrop" id="lightboxBackdrop"></div>
+    <div class="lightbox-content">
+      <button class="lightbox-close-btn" id="lightboxCloseBtn" title="Close">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+      <img id="lightboxImage" src="" alt="Expanded View">
+    </div>
+  </div>
+
+  <!-- PERSISTENT MEMORY MANAGEMENT MODAL -->
+  <div class="modal-wrapper" id="memoryModal">
+    <div class="modal-backdrop" id="memoryModalBackdrop"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <h3>Manage Memory</h3>
+          <p class="modal-subtitle">Qwen remembers facts and previous conversations stored in SQLite to provide persistent context.</p>
+        </div>
+        <button class="modal-close-btn" id="closeMemoryModalBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <!-- SEARCH & ADD MEMORY BAR -->
+        <div class="memory-actions-bar">
+          <div class="memory-search-wrapper">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" id="memorySearchInput" placeholder="Search saved memories...">
+          </div>
+          <button class="btn-secondary" id="showAddMemoryFormBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            <span>Add Memory</span>
+          </button>
+        </div>
+
+        <!-- ADD MEMORY FORM (COLLAPSIBLE) -->
+        <div class="add-memory-form" id="addMemoryForm" style="display: none;">
+          <input type="text" id="newMemoryTopic" placeholder="Topic / Category (e.g. user_preference, project_spec)">
+          <textarea id="newMemoryContent" placeholder="Fact / Memory content to remember..." rows="2"></textarea>
+          <div class="form-buttons">
+            <button type="button" class="btn-ghost" id="cancelAddMemoryBtn">Cancel</button>
+            <button type="button" class="btn-primary" id="saveMemoryBtn">Save Memory</button>
+          </div>
+        </div>
+
+        <!-- MEMORIES LIST -->
+        <div class="memories-list" id="memoriesList">
+          <div class="loading-spinner">Loading stored memories...</div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-danger" id="clearAllMemoriesBtn">Clear all memory</button>
+        <button class="btn-secondary" id="doneMemoryModalBtn">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
