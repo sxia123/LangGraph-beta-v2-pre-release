@@ -612,6 +612,35 @@ html, body {
   margin-bottom: 10px;
 }
 
+.attached-files-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.user-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.user-file-chip .file-chip-icon {
+  font-size: 14px;
+}
+
+.user-file-chip .file-chip-size {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
 .chat-image-thumbnail {
   width: 110px;
   height: 110px;
@@ -1090,6 +1119,73 @@ html, body {
   background-color: var(--status-offline);
 }
 
+.file-stage-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 6px 28px 6px 10px;
+  max-width: 220px;
+  transition: border-color var(--transition-fast);
+}
+
+.file-stage-chip:hover {
+  border-color: var(--border-focus);
+}
+
+.file-stage-chip .file-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.file-stage-chip .file-info {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.file-stage-chip .file-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-stage-chip .file-size {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.file-stage-chip .remove-chip-btn {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  background-color: transparent;
+  border-radius: 50%;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.file-stage-chip .remove-chip-btn:hover {
+  color: var(--text-primary);
+  background-color: var(--status-offline);
+}
+
 /* Chat Input Form */
 .chat-input-form {
   display: flex;
@@ -1159,6 +1255,64 @@ html, body {
   color: var(--btn-disabled-text);
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.pause-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background-color: var(--text-primary);
+  color: var(--bg-main);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-bottom: 3px;
+  transition: transform var(--transition-fast), background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.pause-btn:hover {
+  background-color: var(--status-offline);
+  color: #ffffff;
+  transform: scale(1.06);
+}
+
+/* Floating Pause / Stop Generation Bar */
+.floating-pause-bar {
+  display: none;
+  justify-content: center;
+  width: 100%;
+  margin-bottom: 8px;
+  animation: fadeIn 0.2s ease-in-out;
+}
+
+.floating-pause-bar.show {
+  display: flex;
+}
+
+.floating-pause-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-light);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: var(--radius-xl);
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast), color var(--transition-fast);
+}
+
+.floating-pause-btn:hover {
+  background-color: var(--bg-input);
+  border-color: var(--status-offline);
+  color: #ff6b6b;
+  transform: translateY(-1px);
 }
 
 .input-disclaimer {

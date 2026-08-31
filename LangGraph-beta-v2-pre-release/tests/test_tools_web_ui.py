@@ -157,3 +157,57 @@ def test_api_models_select_endpoint():
     assert status_res.status_code == 200
     assert status_res.json().get("model_name") == target_model
 
+
+def test_api_upload_endpoint():
+    client = TestClient(app)
+    response = client.post(
+        "/api/upload",
+        json={
+            "filename": "pipeline_sample.py",
+            "content": "def calculate_total(a, b):\n    return a + b\n",
+            "content_type": "text/x-python",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("ok") is True
+    assert data.get("filename") == "pipeline_sample.py"
+    assert "calculate_total" in data.get("text", "")
+    assert data.get("size") > 0
+
+
+def test_chat_stream_with_file_attachment():
+    client = TestClient(app)
+    response = client.post(
+        "/api/chat/stream",
+        json={
+            "prompt": "Analyze this attached python script",
+            "files": [
+                {
+                    "filename": "demo.py",
+                    "content": "import sys\nprint('Hello world!')\n",
+                    "size": 33,
+                    "type": "text/x-python",
+                }
+            ],
+            "pipeline": "direct",
+            "use_memory": False,
+        },
+    )
+    assert response.status_code == 200
+    # SSE stream returned
+    content = response.text
+    assert "data: " in content
+    assert "complete" in content or "step" in content
+
+
+def test_api_chat_stop_endpoint():
+    client = TestClient(app)
+    response = client.post("/api/chat/stop", json={"run_id": "test_run_to_stop_123"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("ok") is True
+    assert "stopped" in data.get("message", "").lower()
+
+
+

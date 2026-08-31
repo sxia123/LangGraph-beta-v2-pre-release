@@ -28,6 +28,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const chatForm = document.getElementById('chatForm');
   const chatTextarea = document.getElementById('chatTextarea');
   const sendBtn = document.getElementById('sendBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const floatingPauseBar = document.getElementById('floatingPauseBar');
+  const floatingPauseBtn = document.getElementById('floatingPauseBtn');
   const attachBtn = document.getElementById('attachBtn');
   const fileInput = document.getElementById('fileInput');
   const imageStagingTray = document.getElementById('imageStagingTray');
@@ -90,7 +93,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let activePipeline = 'direct';
   let useMemory = true;
   let stagedImages = []; // Array of Base64 strings
+  let stagedFiles = []; // Array of { filename, content, size, type }
   let isGenerating = false;
+  let activeAbortController = null;
   let currentRunId = null;
   let registeredTools = [];
 
@@ -288,7 +293,7 @@ document.addEventListener('DOMContentLoaded', () => {
     chatThread.innerHTML = '';
     chatThread.appendChild(emptyState);
     emptyState.style.display = 'flex';
-    clearStagedImages();
+    clearStagedAttachments();
     chatTextarea.value = '';
     autoResizeTextarea();
     updateSendButtonState();
@@ -348,7 +353,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // =========================================================================
-  // 4. Multimodal Image Intake (File, Drag & Drop, Clipboard Paste)
+  // 4. Multimodal File & Image Intake (File Input, Drag & Drop, Clipboard)
   // =========================================================================
   attachBtn.addEventListener('click', () => {
     fileInput.click();
@@ -356,47 +361,124 @@ document.addEventListener('DOMContentLoaded', () => {
 
   fileInput.addEventListener('change', () => {
     if (fileInput.files && fileInput.files.length > 0) {
-      Array.from(fileInput.files).forEach(readImageFile);
+      Array.from(fileInput.files).forEach(handleFileInput);
       fileInput.value = '';
     }
   });
 
-  function readImageFile(file) {
-    if (!file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      stageImage(e.target.result);
-    };
-    reader.readAsDataURL(file);
+  function getFileIcon(filename) {
+    if (!filename) return '📁';
+    const ext = filename.split('.').pop().toLowerCase();
+    if (['py'].includes(ext)) return '🐍';
+    if (['js', 'ts', 'jsx', 'tsx'].includes(ext)) return '📜';
+    if (['json'].includes(ext)) return '📋';
+    if (['md', 'txt', 'rst', 'log'].includes(ext)) return '📝';
+    if (['pdf', 'docx', 'doc'].includes(ext)) return '📄';
+    if (['csv', 'tsv', 'xlsx', 'xls'].includes(ext)) return '📊';
+    if (['html', 'css', 'scss', 'xml'].includes(ext)) return '🌐';
+    if (['yaml', 'yml', 'toml', 'env', 'ini', 'conf'].includes(ext)) return '⚙️';
+    if (['sh', 'bash', 'zsh', 'bat', 'ps1'].includes(ext)) return '💻';
+    if (['sql', 'db', 'sqlite'].includes(ext)) return '🗄️';
+    if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'bmp'].includes(ext)) return '🖼️';
+    return '📄';
   }
 
-  function stageImage(dataUrl) {
-    stagedImages.push(dataUrl);
-    renderStagedImages();
-    updateSendButtonState();
+  function formatFileSize(bytes) {
+    if (!bytes || bytes <= 0) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
-  function renderStagedImages() {
+  function handleFileInput(file) {
+    if (!file) return;
+
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        stagedImages.push(e.target.result);
+        renderStagedAttachments();
+      };
+      reader.readAsDataURL(file);
+    } else {
+      // Read text/code/document files
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        stagedFiles.push({
+          filename: file.name,
+          content: e.target.result,
+          size: file.size,
+          type: file.type || 'text/plain',
+        });
+        renderStagedAttachments();
+      };
+      reader.onerror = () => {
+        const binReader = new FileReader();
+        binReader.onload = (be) => {
+          stagedFiles.push({
+            filename: file.name,
+            content: be.target.result,
+            size: file.size,
+            type: file.type || 'application/octet-stream',
+          });
+          renderStagedAttachments();
+        };
+        binReader.readAsDataURL(file);
+      };
+      reader.readAsText(file);
+    }
+  }
+
+  function renderStagedAttachments() {
     imageStagingTray.innerHTML = '';
+
+    // Render Staged Images
     stagedImages.forEach((imgData, index) => {
       const chip = document.createElement('div');
       chip.className = 'stage-chip';
       chip.innerHTML = `
         <img src="${imgData}" alt="Attachment ${index + 1}">
-        <button type="button" class="remove-chip-btn" data-index="${index}" title="Remove image">×</button>
+        <button type="button" class="remove-chip-btn" title="Remove image">×</button>
       `;
       chip.querySelector('.remove-chip-btn').addEventListener('click', (e) => {
         e.stopPropagation();
         stagedImages.splice(index, 1);
-        renderStagedImages();
-        updateSendButtonState();
+        renderStagedAttachments();
       });
       imageStagingTray.appendChild(chip);
     });
+
+    // Render Staged Files
+    stagedFiles.forEach((fileObj, index) => {
+      const chip = document.createElement('div');
+      chip.className = 'file-stage-chip';
+      const icon = getFileIcon(fileObj.filename);
+      const sizeStr = formatFileSize(fileObj.size);
+
+      chip.innerHTML = `
+        <span class="file-icon">${icon}</span>
+        <div class="file-info">
+          <span class="file-name" title="${escapeHtml(fileObj.filename)}">${escapeHtml(fileObj.filename)}</span>
+          <span class="file-size">${escapeHtml(sizeStr)}</span>
+        </div>
+        <button type="button" class="remove-chip-btn" title="Remove file">×</button>
+      `;
+
+      chip.querySelector('.remove-chip-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        stagedFiles.splice(index, 1);
+        renderStagedAttachments();
+      });
+
+      imageStagingTray.appendChild(chip);
+    });
+
+    updateSendButtonState();
   }
 
-  function clearStagedImages() {
+  function clearStagedAttachments() {
     stagedImages = [];
+    stagedFiles = [];
     imageStagingTray.innerHTML = '';
     updateSendButtonState();
   }
@@ -430,20 +512,20 @@ document.addEventListener('DOMContentLoaded', () => {
     dragDropOverlay.classList.remove('active');
 
     if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      Array.from(e.dataTransfer.files).forEach(readImageFile);
+      Array.from(e.dataTransfer.files).forEach(handleFileInput);
     }
   });
 
-  // Clipboard Paste (Ctrl+V screenshot / image intake)
+  // Clipboard Paste (Ctrl+V screenshot / file intake)
   window.addEventListener('paste', (e) => {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
 
     for (let i = 0; i < items.length; i++) {
-      if (items[i].type.indexOf('image') !== -1) {
+      if (items[i].kind === 'file') {
         const blob = items[i].getAsFile();
         if (blob) {
-          readImageFile(blob);
+          handleFileInput(blob);
         }
       }
     }
@@ -479,7 +561,43 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateSendButtonState() {
     const hasText = chatTextarea.value.trim().length > 0;
     const hasImages = stagedImages.length > 0;
-    sendBtn.disabled = !(hasText || hasImages) || isGenerating;
+    const hasFiles = stagedFiles.length > 0;
+
+    if (isGenerating) {
+      sendBtn.style.display = 'none';
+      if (pauseBtn) pauseBtn.style.display = 'flex';
+      if (floatingPauseBar) floatingPauseBar.classList.add('show');
+    } else {
+      if (pauseBtn) pauseBtn.style.display = 'none';
+      if (floatingPauseBar) floatingPauseBar.classList.remove('show');
+      sendBtn.style.display = 'flex';
+      sendBtn.disabled = !(hasText || hasImages || hasFiles);
+    }
+  }
+
+  async function pauseGeneration() {
+    if (!isGenerating) return;
+    if (activeAbortController) {
+      activeAbortController.abort();
+      activeAbortController = null;
+    }
+    try {
+      await fetch('/api/chat/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ run_id: currentRunId }),
+      });
+    } catch {
+      // Ignore cancellation fetch error
+    }
+  }
+
+  if (pauseBtn) {
+    pauseBtn.addEventListener('click', pauseGeneration);
+  }
+
+  if (floatingPauseBtn) {
+    floatingPauseBtn.addEventListener('click', pauseGeneration);
   }
 
   chatTextarea.addEventListener('input', () => {
@@ -490,7 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
   chatTextarea.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (!sendBtn.disabled) {
+      if (!sendBtn.disabled && !isGenerating) {
         chatForm.dispatchEvent(new Event('submit'));
       }
     }
@@ -540,21 +658,23 @@ document.addEventListener('DOMContentLoaded', () => {
   chatForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const promptText = chatTextarea.value.trim();
-    if (!promptText && stagedImages.length === 0) return;
+    if (!promptText && stagedImages.length === 0 && stagedFiles.length === 0) return;
     if (isGenerating) return;
 
     const currentAttachments = [...stagedImages];
+    const currentFiles = [...stagedFiles];
 
     // Hide welcome state
     emptyState.style.display = 'none';
 
     // Append User Message to Thread
-    appendUserMessage(promptText, currentAttachments);
+    appendUserMessage(promptText, currentAttachments, currentFiles);
 
     // Clear input & staging
     chatTextarea.value = '';
-    clearStagedImages();
+    clearStagedAttachments();
     autoResizeTextarea();
+    activeAbortController = new AbortController();
     isGenerating = true;
     updateSendButtonState();
 
@@ -588,9 +708,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const res = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: activeAbortController.signal,
         body: JSON.stringify({
           prompt: promptText,
           images: currentAttachments.length > 0 ? currentAttachments : null,
+          files: currentFiles.length > 0 ? currentFiles : null,
           pipeline: activePipeline,
           model_name: activeModel,
           use_memory: useMemory,
@@ -670,8 +792,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
     } catch (err) {
-      markdownBody.innerHTML = `<div style="color: var(--status-offline); padding: 8px 0;">Error: ${escapeHtml(err.message)}</div>`;
+      if (err.name === 'AbortError') {
+        if (!finalAnswerText) {
+          finalAnswerText = '[Generation paused by user]';
+        }
+        renderMarkdown(markdownBody, finalAnswerText);
+      } else {
+        markdownBody.innerHTML = `<div style="color: var(--status-offline); padding: 8px 0;">Error: ${escapeHtml(err.message)}</div>`;
+      }
     } finally {
+      activeAbortController = null;
       clearInterval(timerInterval);
       const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       if (thoughtBox) {
@@ -691,7 +821,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  function appendUserMessage(text, images) {
+  function appendUserMessage(text, images, files) {
     const row = document.createElement('div');
     row.className = 'message-row user';
 
@@ -704,9 +834,28 @@ document.addEventListener('DOMContentLoaded', () => {
       imagesHtml += `</div>`;
     }
 
+    let filesHtml = '';
+    if (files && files.length > 0) {
+      filesHtml = `<div class="attached-files-list">`;
+      files.forEach((f) => {
+        const fn = typeof f === 'string' ? f : (f.filename || 'File');
+        const icon = getFileIcon(fn);
+        const sizeStr = (typeof f === 'object' && f.size) ? formatFileSize(f.size) : '';
+        filesHtml += `
+          <div class="user-file-chip">
+            <span class="file-chip-icon">${icon}</span>
+            <span class="file-chip-name">${escapeHtml(fn)}</span>
+            ${sizeStr ? `<span class="file-chip-size">(${escapeHtml(sizeStr)})</span>` : ''}
+          </div>
+        `;
+      });
+      filesHtml += `</div>`;
+    }
+
     row.innerHTML = `
       <div class="user-message-bubble">
         ${imagesHtml}
+        ${filesHtml}
         ${text ? `<div class="user-text">${escapeHtml(text)}</div>` : ''}
       </div>
     `;

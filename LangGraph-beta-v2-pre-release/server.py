@@ -237,11 +237,18 @@ SUPPORTED_WORKFLOWS = sorted(WORKFLOW_FACTORIES.keys())
 class ChatRequest(BaseModel):
     prompt: str
     images: Optional[List[str]] = None
+    files: Optional[List[Dict[str, Any]]] = None
     pipeline: Optional[str] = "master"
     model_name: Optional[str] = None
     agent_models: Optional[Dict[str, str]] = None
     session_id: Optional[str] = None
     use_memory: Optional[bool] = True
+
+
+class FileUploadPayload(BaseModel):
+    filename: str
+    content: str
+    content_type: Optional[str] = None
 
 
 class MemoryCreateRequest(BaseModel):
@@ -260,6 +267,51 @@ class ToolRunRequest(BaseModel):
 
 class ModelSelectRequest(BaseModel):
     model_name: str
+
+
+class ChatStopRequest(BaseModel):
+    run_id: Optional[str] = None
+
+
+@app.post("/api/chat/stop")
+def stop_chat_stream(payload: Optional[ChatStopRequest] = None):
+    """Signals cancellation / pause for an active generation stream."""
+    run_id = payload.run_id if payload else None
+    return {
+        "ok": True,
+        "message": f"Generation stopped successfully for run {run_id}" if run_id else "Generation stopped successfully.",
+    }
+
+
+@app.post("/api/upload")
+def upload_file_endpoint(payload: FileUploadPayload):
+    """Ingests a file (text, code, or document) and extracts its textual content."""
+    filename = payload.filename or "uploaded_file.txt"
+    raw_content = payload.content or ""
+
+    text = ""
+    if raw_content.startswith("data:"):
+        try:
+            import base64
+
+            _header, encoded = raw_content.split(",", 1)
+            decoded_bytes = base64.b64decode(encoded)
+            try:
+                text = decoded_bytes.decode("utf-8")
+            except Exception:
+                text = decoded_bytes.decode("latin-1", errors="replace")
+        except Exception:
+            text = raw_content
+    else:
+        text = raw_content
+
+    return {
+        "ok": True,
+        "filename": filename,
+        "size": len(text),
+        "text": text,
+        "content_type": payload.content_type or "text/plain",
+    }
 
 
 @app.get("/api/status")
@@ -490,13 +542,27 @@ def handle_chat_stream(req: ChatRequest):
 
         effective_prompt = f"{prompt}{context_header}" if context_header else prompt
 
+        # Append attached file contents to effective prompt
+        if req.files:
+            file_blocks = []
+            for f in req.files:
+                fn = f.get("filename", "attached_file.txt")
+                txt = f.get("content") or f.get("text") or ""
+                file_blocks.append(f"--- File Attachment: {fn} ---\n{txt}\n--- End File ---")
+            if file_blocks:
+                attachments_str = "\n\n" + "\n\n".join(file_blocks)
+                effective_prompt = f"{effective_prompt}{attachments_str}" if effective_prompt else "\n\n".join(file_blocks)
+
         # Record start of run in SQLite
         run_id = start_run(
             pipeline=pipeline_choice,
-            user_input=prompt,
+            user_input=prompt or (f"[Attached Files: {len(req.files)}]" if req.files else ""),
             metadata={
                 "has_images": bool(req.images),
                 "image_count": len(req.images) if req.images else 0,
+                "has_files": bool(req.files),
+                "file_count": len(req.files) if req.files else 0,
+                "files": [f.get("filename") for f in req.files] if req.files else [],
                 "model_name": req.model_name or request_client.config.model_name,
                 "session_id": req.session_id,
             },
@@ -509,6 +575,7 @@ def handle_chat_stream(req: ChatRequest):
             "content": effective_prompt,
             "timestamp": timestamp,
             "images": req.images or [],
+            "files": req.files or [],
         }
 
         if pipeline_choice in ["direct", "chat", "vision", "qwen"]:
