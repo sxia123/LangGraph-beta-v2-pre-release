@@ -57,6 +57,34 @@ document.addEventListener('DOMContentLoaded', () => {
   const newMemoryContent = document.getElementById('newMemoryContent');
   const clearAllMemoriesBtn = document.getElementById('clearAllMemoriesBtn');
 
+  // Tools Modal & Controls
+  const openToolsModalBtn = document.getElementById('openToolsModalBtn');
+  const topbarToolsBtn = document.getElementById('topbarToolsBtn');
+  const toolsModal = document.getElementById('toolsModal');
+  const toolsModalBackdrop = document.getElementById('toolsModalBackdrop');
+  const closeToolsModalBtn = document.getElementById('closeToolsModalBtn');
+  const doneToolsModalBtn = document.getElementById('doneToolsModalBtn');
+  const toolsBadge = document.getElementById('toolsBadge');
+  const topbarToolsBadge = document.getElementById('topbarToolsBadge');
+  const tabToolsCount = document.getElementById('tabToolsCount');
+  const tabBtnCatalog = document.getElementById('tabBtnCatalog');
+  const tabBtnTester = document.getElementById('tabBtnTester');
+  const tabBtnCheckpoints = document.getElementById('tabBtnCheckpoints');
+  const tabPaneCatalog = document.getElementById('tabPaneCatalog');
+  const tabPaneTester = document.getElementById('tabPaneTester');
+  const tabPaneCheckpoints = document.getElementById('tabPaneCheckpoints');
+  const toolsGrid = document.getElementById('toolsGrid');
+  const testerToolSelect = document.getElementById('testerToolSelect');
+  const testerToolArgs = document.getElementById('testerToolArgs');
+  const runToolTesterBtn = document.getElementById('runToolTesterBtn');
+  const testerOutputBox = document.getElementById('testerOutputBox');
+  const testerStatusBadge = document.getElementById('testerStatusBadge');
+  const testerOutputContent = document.getElementById('testerOutputContent');
+  const testerCheckpointFooter = document.getElementById('testerCheckpointFooter');
+  const checkpointsFilterInput = document.getElementById('checkpointsFilterInput');
+  const refreshCheckpointsBtn = document.getElementById('refreshCheckpointsBtn');
+  const checkpointsList = document.getElementById('checkpointsList');
+
   // State
   let activeModel = 'Qwen3.8-27B-oQ6-mtp';
   let activePipeline = 'direct';
@@ -64,6 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let stagedImages = []; // Array of Base64 strings
   let isGenerating = false;
   let currentRunId = null;
+  let registeredTools = [];
 
   // Configure marked for clean markdown rendering
   if (window.marked) {
@@ -361,6 +390,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function getAgentBadgeClass(agentName) {
     const name = String(agentName || '').toLowerCase();
+    if (name.includes('tool')) return 'tool-badge';
     if (name.includes('supervisor')) return 'badge-purple';
     if (name.includes('research')) return 'badge-cyan';
     if (name.includes('coder') || name.includes('dev')) return 'badge-emerald';
@@ -1004,8 +1034,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
       renderMarkdown(markdownBody, run.final_answer || 'No response recorded.');
       refreshRunsHistory();
-    } catch (err) {
-      console.error('Load run error', err);
+    } catch {
+      // Ignore load error
     }
   }
 
@@ -1019,12 +1049,325 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshRunsHistory();
         refreshMemoryMetrics();
       }
-    } catch (err) {
-      console.error('Delete run error', err);
+    } catch {
+      // Ignore delete error
     }
+  }
+
+  // =========================================================================
+  // 8. Tools Registry, Diagnostics & Interactive Tester
+  // =========================================================================
+  if (openToolsModalBtn) {
+    openToolsModalBtn.addEventListener('click', () => {
+      openToolsModal();
+    });
+  }
+
+  if (topbarToolsBtn) {
+    topbarToolsBtn.addEventListener('click', () => {
+      openToolsModal();
+    });
+  }
+
+  if (closeToolsModalBtn) {
+    closeToolsModalBtn.addEventListener('click', () => {
+      closeToolsModal();
+    });
+  }
+
+  if (doneToolsModalBtn) {
+    doneToolsModalBtn.addEventListener('click', () => {
+      closeToolsModal();
+    });
+  }
+
+  if (toolsModalBackdrop) {
+    toolsModalBackdrop.addEventListener('click', () => {
+      closeToolsModal();
+    });
+  }
+
+  function openToolsModal() {
+    toolsModal.classList.add('open');
+    fetchTools();
+  }
+
+  function closeToolsModal() {
+    toolsModal.classList.remove('open');
+  }
+
+  // Tab Switching
+  if (tabBtnCatalog && tabBtnTester && tabBtnCheckpoints) {
+    tabBtnCatalog.addEventListener('click', () => switchToolsTab('catalog'));
+    tabBtnTester.addEventListener('click', () => switchToolsTab('tester'));
+    tabBtnCheckpoints.addEventListener('click', () => {
+      switchToolsTab('checkpoints');
+      fetchCheckpoints();
+    });
+  }
+
+  function switchToolsTab(tabName) {
+    [tabBtnCatalog, tabBtnTester, tabBtnCheckpoints].forEach((btn) => {
+      if (!btn) return;
+      btn.classList.toggle('active', btn.dataset.tab === tabName);
+    });
+
+    if (tabPaneCatalog) tabPaneCatalog.style.display = tabName === 'catalog' ? 'flex' : 'none';
+    if (tabPaneTester) tabPaneTester.style.display = tabName === 'tester' ? 'flex' : 'none';
+    if (tabPaneCheckpoints) tabPaneCheckpoints.style.display = tabName === 'checkpoints' ? 'flex' : 'none';
+  }
+
+  async function fetchTools() {
+    try {
+      const res = await fetch('/api/tools');
+      if (!res.ok) return;
+      const data = await res.json();
+      registeredTools = data.tools || [];
+      const count = data.count || registeredTools.length;
+
+      if (toolsBadge) toolsBadge.textContent = count;
+      if (topbarToolsBadge) topbarToolsBadge.textContent = count;
+      if (tabToolsCount) tabToolsCount.textContent = count;
+
+      renderToolsCatalog(registeredTools);
+      populateTesterSelect(registeredTools);
+    } catch {
+      if (toolsGrid) {
+        toolsGrid.innerHTML = '<div style="color: var(--status-offline); padding: 12px;">Failed to load tools registry.</div>';
+      }
+    }
+  }
+
+  function renderToolsCatalog(tools) {
+    if (!toolsGrid) return;
+    if (!tools || tools.length === 0) {
+      toolsGrid.innerHTML = '<div class="loading-spinner">No tools currently registered.</div>';
+      return;
+    }
+
+    toolsGrid.innerHTML = '';
+    tools.forEach((t) => {
+      const card = document.createElement('div');
+      card.className = 'tool-card';
+
+      let paramsHtml = '';
+      if (t.params && t.params.length > 0) {
+        paramsHtml = `<div class="tool-params-list">`;
+        t.params.forEach((p) => {
+          paramsHtml += `<span class="tool-param-pill">${escapeHtml(p)}</span>`;
+        });
+        paramsHtml += `</div>`;
+      } else {
+        paramsHtml = `<div class="tool-params-list"><span class="tool-param-pill">no params</span></div>`;
+      }
+
+      card.innerHTML = `
+        <div class="tool-card-top">
+          <span class="tool-name-badge">${escapeHtml(t.name)}</span>
+          <button type="button" class="tool-test-btn" data-tool="${escapeHtml(t.name)}">Test Tool</button>
+        </div>
+        <div class="tool-desc">${escapeHtml(t.description || 'No description provided.')}</div>
+        ${paramsHtml}
+      `;
+
+      card.querySelector('.tool-test-btn').addEventListener('click', () => {
+        selectToolInTester(t.name);
+      });
+
+      toolsGrid.appendChild(card);
+    });
+  }
+
+  function populateTesterSelect(tools) {
+    if (!testerToolSelect) return;
+    testerToolSelect.innerHTML = '';
+    tools.forEach((t) => {
+      const opt = document.createElement('option');
+      opt.value = t.name;
+      opt.textContent = `${t.name} (${t.params.join(', ') || 'no params'})`;
+      testerToolSelect.appendChild(opt);
+    });
+
+    if (tools.length > 0) {
+      updateTesterTemplate(tools[0].name);
+    }
+  }
+
+  function selectToolInTester(toolName) {
+    switchToolsTab('tester');
+    if (testerToolSelect) {
+      testerToolSelect.value = toolName;
+      updateTesterTemplate(toolName);
+    }
+  }
+
+  if (testerToolSelect) {
+    testerToolSelect.addEventListener('change', (e) => {
+      updateTesterTemplate(e.target.value);
+    });
+  }
+
+  function updateTesterTemplate(toolName) {
+    if (!testerToolArgs) return;
+    if (toolName === 'web_search') {
+      testerToolArgs.value = JSON.stringify({ query: 'LangGraph architecture and agent tools', max_results: 3 }, null, 2);
+    } else if (toolName === 'math_eval') {
+      testerToolArgs.value = JSON.stringify({ expression: '125 * 37 - 50' }, null, 2);
+    } else if (toolName === 'python_repl') {
+      testerToolArgs.value = JSON.stringify({ code: 'import math\nprint(f"pi={math.pi:.4f}, sqrt(2)={math.sqrt(2):.4f}")' }, null, 2);
+    } else if (toolName === 'wikipedia') {
+      testerToolArgs.value = JSON.stringify({ query: 'LangGraph', sentences: 3 }, null, 2);
+    } else if (toolName === 'arxiv') {
+      testerToolArgs.value = JSON.stringify({ query: 'Large Language Models multi-agent', max_results: 2 }, null, 2);
+    } else if (toolName === 'web_scrape') {
+      testerToolArgs.value = JSON.stringify({ url: 'https://example.com' }, null, 2);
+    } else if (toolName === 'github_status') {
+      testerToolArgs.value = JSON.stringify({ repo_dir: '.' }, null, 2);
+    } else {
+      const toolObj = registeredTools.find((t) => t.name === toolName);
+      if (toolObj && toolObj.params) {
+        const dummy = {};
+        toolObj.params.forEach((p) => { dummy[p] = 'example_value'; });
+        testerToolArgs.value = JSON.stringify(dummy, null, 2);
+      } else {
+        testerToolArgs.value = '{}';
+      }
+    }
+  }
+
+  if (runToolTesterBtn) {
+    runToolTesterBtn.addEventListener('click', async () => {
+      const toolName = testerToolSelect.value;
+      if (!toolName) return;
+
+      let parsedArgs = {};
+      try {
+        const raw = testerToolArgs.value.trim();
+        if (raw) parsedArgs = JSON.parse(raw);
+      } catch (err) {
+        alert(`Invalid JSON in Arguments: ${err.message}`);
+        return;
+      }
+
+      runToolTesterBtn.disabled = true;
+      runToolTesterBtn.innerHTML = '<span>Executing...</span>';
+      testerOutputBox.style.display = 'block';
+      testerOutputContent.textContent = 'Running tool with SQLite checkpointing...';
+      testerStatusBadge.className = 'output-status-badge';
+      testerStatusBadge.textContent = 'RUNNING';
+      testerCheckpointFooter.innerHTML = '';
+
+      const startT = performance.now();
+      try {
+        const res = await fetch('/api/tools/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tool: toolName,
+            args: parsedArgs,
+            metadata: { source: 'web_ui_tester' },
+          }),
+        });
+        const result = await res.json();
+        const elapsed = ((performance.now() - startT) / 1000).toFixed(3);
+
+        const ok = result.ok !== false;
+        testerStatusBadge.className = `output-status-badge ${ok ? 'success' : 'error'}`;
+        testerStatusBadge.textContent = ok ? 'SUCCESS (200)' : 'FAILED';
+
+        const displayMsg = result.message !== undefined ? result.message : JSON.stringify(result, null, 2);
+        testerOutputContent.textContent = typeof displayMsg === 'object' ? JSON.stringify(displayMsg, null, 2) : String(displayMsg);
+
+        let footerChips = `<span class="checkpoint-chip">Duration: ${elapsed}s</span>`;
+        if (result.checkpoint_id) {
+          footerChips += `<span class="checkpoint-chip">Pre-CP: ${escapeHtml(result.checkpoint_id)}</span>`;
+        }
+        if (result.post_checkpoint_id) {
+          footerChips += `<span class="checkpoint-chip">Post-CP: ${escapeHtml(result.post_checkpoint_id)}</span>`;
+        }
+        testerCheckpointFooter.innerHTML = footerChips;
+      } catch (err) {
+        testerStatusBadge.className = 'output-status-badge error';
+        testerStatusBadge.textContent = 'ERROR';
+        testerOutputContent.textContent = `Network / Execution error: ${err.message}`;
+      } finally {
+        runToolTesterBtn.disabled = false;
+        runToolTesterBtn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span>Run Tool with Checkpoint</span>
+        `;
+      }
+    });
+  }
+
+  async function fetchCheckpoints(filterQuery) {
+    if (!checkpointsList) return;
+    checkpointsList.innerHTML = '<div class="loading-spinner">Loading checkpoints from SQLite...</div>';
+
+    try {
+      const url = filterQuery ? `/api/tools/checkpoints?limit=50&tool_name=${encodeURIComponent(filterQuery)}` : '/api/tools/checkpoints?limit=50';
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const checkpoints = data.checkpoints || [];
+
+      if (checkpoints.length === 0) {
+        checkpointsList.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; padding: 12px;">No tool checkpoints recorded in memory.</div>';
+        return;
+      }
+
+      checkpointsList.innerHTML = '';
+      checkpoints.forEach((cp) => {
+        const item = document.createElement('div');
+        item.className = 'checkpoint-item';
+
+        const eventName = cp.event || 'checkpoint';
+        const toolName = (cp.metadata && cp.metadata.tool) ? cp.metadata.tool : 'tool';
+        const type = (cp.metadata && cp.metadata.checkpoint_type) ? cp.metadata.checkpoint_type : 'checkpoint';
+        const timeVal = cp.timestamp || 'N/A';
+        const resultSummary = cp.result ? String(cp.result).slice(0, 300) : 'No result payload';
+
+        item.innerHTML = `
+          <div class="checkpoint-item-top">
+            <span class="checkpoint-event-tag">${escapeHtml(eventName)}</span>
+            <span class="checkpoint-item-meta">${escapeHtml(timeVal)}</span>
+          </div>
+          <div class="checkpoint-item-meta">
+            <span>Tool: <strong>${escapeHtml(toolName)}</strong></span>
+            <span>Type: ${escapeHtml(type)}</span>
+            <span>ID: ${escapeHtml(cp.id || 'N/A')}</span>
+          </div>
+          <div class="checkpoint-item-summary">${escapeHtml(resultSummary)}</div>
+        `;
+        checkpointsList.appendChild(item);
+      });
+    } catch {
+      checkpointsList.innerHTML = '<div style="color: var(--status-offline); font-size: 13px; padding: 8px;">Failed to load checkpoints.</div>';
+    }
+  }
+
+  if (refreshCheckpointsBtn) {
+    refreshCheckpointsBtn.addEventListener('click', () => {
+      const q = checkpointsFilterInput ? checkpointsFilterInput.value.trim() : '';
+      fetchCheckpoints(q);
+    });
+  }
+
+  if (checkpointsFilterInput) {
+    let cpFilterTimer = null;
+    checkpointsFilterInput.addEventListener('input', () => {
+      clearTimeout(cpFilterTimer);
+      cpFilterTimer = setTimeout(() => {
+        fetchCheckpoints(checkpointsFilterInput.value.trim());
+      }, 300);
+    });
   }
 
   // Initial loads
   refreshRunsHistory();
   refreshMemoryMetrics();
+  fetchTools();
 });
+

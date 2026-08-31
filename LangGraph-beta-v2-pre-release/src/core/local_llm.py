@@ -408,11 +408,16 @@ class LocalLLMClient:
                 content = re.sub(pattern, "", content, flags=re.IGNORECASE).strip()
 
         tool_calls = []
-        json_match = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", content)
-        if json_match:
+        json_matches = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", content)
+        if not json_matches:
+            raw_match = re.search(r"(\{\s*\"(?:tool|name)\"\s*:\s*\"[^\"]+\"[\s\S]*?\})", content)
+            if raw_match:
+                json_matches = [raw_match.group(1)]
+
+        for j_str in json_matches:
             try:
-                parsed = json.loads(json_match.group(1))
-                if "tool" in parsed or "name" in parsed:
+                parsed = json.loads(j_str)
+                if isinstance(parsed, dict) and ("tool" in parsed or "name" in parsed):
                     tool_calls.append(
                         {
                             "id": f"call_{int(time.time() * 1000)}",
@@ -435,14 +440,50 @@ class LocalLLMClient:
     ) -> LLMResponse:
         time.sleep(0.3)
         last_user = ""
+        has_tool_result = False
         for m in reversed(messages):
-            if isinstance(m, dict) and m.get("role") == "user":
-                last_user = m.get("content", "")
-                break
+            if isinstance(m, dict):
+                content_val = str(m.get("content", ""))
+                if "Tool [" in content_val or "Tool Result" in content_val or m.get("role") == "tool":
+                    has_tool_result = True
+                if m.get("role") == "user" and not last_user:
+                    last_user = content_val
         if not last_user and system_prompt:
             last_user = system_prompt
 
         sys_lower = system_prompt.lower()
+        user_lower = last_user.lower()
+
+        # Handle tool calling when available_tools provided and not yet executed
+        if available_tools and not has_tool_result:
+            if "math_eval" in available_tools and any(op in user_lower for op in ["math_eval", "calculate", "calc", "+", "*", "^", "/", "-"]):
+                expr = re.search(r"[\d\s\+\-\*\/\^\(\)\.]+", last_user)
+                clean_expr = expr.group(0).strip() if expr else "2 + 2"
+                return LLMResponse(
+                    content=f'```json\n{{"tool": "math_eval", "args": {{"expression": "{clean_expr}"}}}}\n```',
+                    thought=f"Request requires mathematical evaluation. Calling math_eval with expression: {clean_expr}",
+                    tool_calls=[{"id": f"call_{int(time.time()*1000)}", "name": "math_eval", "args": {"expression": clean_expr}}],
+                )
+            if "python_repl" in available_tools and any(kw in user_lower for kw in ["python_repl", "python", "script", "run code"]):
+                py_code = 'print("Executed successfully via Python REPL")'
+                return LLMResponse(
+                    content=f'```json\n{{"tool": "python_repl", "args": {{"code": "{py_code}"}}}}\n```',
+                    thought="Request requires Python execution. Calling python_repl.",
+                    tool_calls=[{"id": f"call_{int(time.time()*1000)}", "name": "python_repl", "args": {"code": py_code}}],
+                )
+            if "web_search" in available_tools and any(kw in user_lower for kw in ["search", "find", "lookup", "who is", "what is"]):
+                return LLMResponse(
+                    content=f'```json\n{{"tool": "web_search", "args": {{"query": "{last_user[:50]}"}}}}\n```',
+                    thought=f"Request requires live web search. Calling web_search for query: {last_user[:50]}",
+                    tool_calls=[{"id": f"call_{int(time.time()*1000)}", "name": "web_search", "args": {"query": last_user[:50]}}],
+                )
+
+        if has_tool_result:
+            return LLMResponse(
+                content=f"Based on the tool execution results, here is the answer for '{last_user}':\n\nThe operation completed successfully.",
+                thought="Synthesized final answer from verified tool execution output.",
+            )
+
         if "supervisor" in sys_lower:
             if "critic approved: yes" in sys_lower:
                 return LLMResponse(
@@ -459,12 +500,12 @@ class LocalLLMClient:
                     content="coder",
                     thought="Domain research completed. Routing to Coder to implement solution.",
                 )
-            if any(k in last_user.lower() for k in ["search", "find", "research"]):
+            if any(k in user_lower for k in ["search", "find", "research"]):
                 return LLMResponse(
                     content="researcher",
                     thought="User request requires live factual knowledge. Delegating research to DuckDuckGo search.",
                 )
-            if any(k in last_user.lower() for k in ["code", "script", "python", "react"]):
+            if any(k in user_lower for k in ["code", "script", "python", "react"]):
                 return LLMResponse(
                     content="coder",
                     thought="Technical development task identified. Assigning to Lead Developer node.",

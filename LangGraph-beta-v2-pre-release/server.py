@@ -32,11 +32,13 @@ from src.core.memory_store import (
     get_memory_summary,
     get_run,
     get_run_memories,
+    get_tool_checkpoints,
     list_runs,
     save_memory,
     search_memories,
     start_run,
 )
+from src.core.tool_loader import get_tool_loader
 
 app = FastAPI(title="LangGraph Web API Server", version="1.0.0")
 
@@ -56,18 +58,36 @@ class DirectChatState(TypedDict, total=False):
     user_input: str
     final_response: str
     agent_thoughts: Annotated[List[Dict[str, Any]], operator.add]
+    run_id: Optional[str]
 
 
 def create_direct_chat_graph(client: LocalLLMClient):
     workflow = StateGraph(DirectChatState)
+    tools = get_tool_loader(client)
 
     def direct_chat_node(state: DirectChatState) -> Dict[str, Any]:
         messages = state.get("messages", [])
         last_user = messages[-1] if messages else {}
         images = last_user.get("images") or []
+        run_id = state.get("run_id")
+
+        tool_prompt = (
+            "You are Qwen, a helpful, highly capable vision and language AI assistant equipped with tools.\n"
+            "Respond accurately, clearly, and concisely to user questions and images.\n\n"
+            "Available Tools (imperative execution):\n"
+            f"{tools.prompt_block()}\n\n"
+            "If the user asks you to perform a calculation, write/run Python code, search the web, lookup Wikipedia/ArXiv, "
+            "convert documents, or use git, format your tool call as a JSON block:\n"
+            "```json\n"
+            '{"tool": "<tool_name>", "args": {<param_name>: <value>}}\n'
+            "```\n"
+            "If no tool is required, respond directly with your helpful answer."
+        )
+
         res = client.generate_completion(
-            system_prompt="You are Qwen, a helpful, highly capable vision and language AI assistant. Respond accurately, clearly, and concisely to user questions and images.",
+            system_prompt=tool_prompt,
             messages=messages,
+            available_tools=tools.list_tools(),
             images=images,
         )
         thought_entries = []
@@ -79,6 +99,100 @@ def create_direct_chat_graph(client: LocalLLMClient):
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             )
+
+        # Check for tool calls
+        tool_calls = res.tool_calls or []
+        if not tool_calls:
+            import re
+            json_matches = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", res.content)
+            if not json_matches:
+                raw_match = re.search(r"(\{\s*\"(?:tool|name)\"\s*:\s*\"[^\"]+\"[\s\S]*?\})", res.content)
+                if raw_match:
+                    json_matches = [raw_match.group(1)]
+            for j_str in json_matches:
+                try:
+                    parsed = json.loads(j_str)
+                    if isinstance(parsed, dict) and ("tool" in parsed or "name" in parsed):
+                        tool_calls.append({
+                            "name": parsed.get("tool") or parsed.get("name"),
+                            "args": parsed.get("args") or parsed.get("parameters") or {},
+                        })
+                        break
+                except Exception:
+                    pass
+
+        if tool_calls:
+            for tc in tool_calls:
+                t_name = tc.get("name")
+                t_args = tc.get("args") or {}
+                if t_name:
+                    tool_res = tools.run(
+                        t_name,
+                        run_id=run_id,
+                        metadata={"source": "direct_chat"},
+                        **t_args,
+                    )
+                    cp_id = tool_res.get("checkpoint_id")
+                    post_id = tool_res.get("post_checkpoint_id")
+                    status_text = "SUCCESS" if tool_res.get("ok") else "FAILED"
+                    msg_text = tool_res.get("message", "")
+
+                    thought_entries.append(
+                        {
+                            "agent": f"Tool: {t_name}",
+                            "thought": (
+                                f"**Tool Execution**: `{t_name}` ({status_text})\n"
+                                f"- **Arguments**: `{json.dumps(t_args)}`\n"
+                                f"- **Checkpoint**: `{post_id or cp_id or 'N/A'}`\n\n"
+                                f"**Result Preview**:\n```\n{str(msg_text)[:1200]}\n```"
+                            ),
+                            "tool": t_name,
+                            "args": t_args,
+                            "result": tool_res,
+                            "ok": tool_res.get("ok", False),
+                            "checkpoint_id": post_id or cp_id,
+                            "timestamp": time.strftime("%H:%M:%S"),
+                        }
+                    )
+
+                    # Synthesize final answer with tool result context
+                    synth_messages = list(messages) + [
+                        {
+                            "role": "assistant",
+                            "content": f"Executed tool [{t_name}].",
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Tool [{t_name}] Execution Result:\n{msg_text}\n\nPlease synthesize the final answer based on this tool result.",
+                        },
+                    ]
+                    synth_res = client.generate_completion(
+                        system_prompt="You are Qwen, a helpful vision and language AI assistant. Provide a clean, direct, and complete final answer to the user based on the tool result.",
+                        messages=synth_messages,
+                    )
+                    if synth_res.thought:
+                        thought_entries.append(
+                            {
+                                "agent": "Qwen Synthesis",
+                                "thought": synth_res.thought,
+                                "timestamp": time.strftime("%H:%M:%S"),
+                            }
+                        )
+                    final_text = synth_res.content
+                    return {
+                        "final_response": final_text,
+                        "messages": [
+                            {
+                                "id": f"qwen_{int(time.time() * 1000)}",
+                                "sender": "Qwen",
+                                "role": "assistant",
+                                "content": final_text,
+                                "timestamp": time.strftime("%H:%M:%S"),
+                            }
+                        ],
+                        "agent_thoughts": thought_entries,
+                    }
+
         return {
             "final_response": res.content,
             "messages": [
@@ -137,17 +251,72 @@ class MemoryCreateRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class ToolRunRequest(BaseModel):
+    tool: str
+    args: Optional[Dict[str, Any]] = None
+    run_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
 @app.get("/api/status")
 def get_status():
-    """Returns local LLM provider configuration and connection status."""
+    """Returns local LLM provider configuration, connection status, and tool availability."""
     conn = llm_client.ping()
+    tools = get_tool_loader(llm_client)
+    tool_names = tools.list_tools()
     return {
         "provider": llm_client.config.provider,
         "base_url": llm_client.config.base_url,
         "model_name": llm_client.config.model_name,
         "agent_models": llm_client.config.agent_models,
         "supported_workflows": SUPPORTED_WORKFLOWS,
+        "tools_count": len(tool_names),
+        "available_tools": tool_names,
         "connection": conn,
+    }
+
+
+@app.get("/api/tools")
+def list_tools_endpoint():
+    """Returns the list of all registered tools and their parameter metadata."""
+    tools = get_tool_loader(llm_client)
+    return {
+        "ok": True,
+        "count": len(tools.list_tools()),
+        "tools": tools.describe(),
+        "tool_names": tools.list_tools(),
+    }
+
+
+@app.post("/api/tools/run")
+def execute_tool_endpoint(req: ToolRunRequest):
+    """Directly executes a tool by name with arguments and pre/post checkpointing."""
+    tools = get_tool_loader(llm_client)
+    tool_name = req.tool.strip()
+    kwargs = req.args or {}
+    run_id = req.run_id or f"direct_tool_run_{int(time.time() * 1000)}"
+
+    result = tools.run(
+        tool_name,
+        run_id=run_id,
+        metadata=req.metadata or {"source": "api_tools_run"},
+        **kwargs,
+    )
+    return result
+
+
+@app.get("/api/tools/checkpoints")
+def get_checkpoints_endpoint(
+    run_id: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    limit: int = 50,
+):
+    """Retrieve tool execution checkpoints from persistent SQLite memory."""
+    checkpoints = get_tool_checkpoints(run_id=run_id, tool_name=tool_name)
+    return {
+        "ok": True,
+        "count": len(checkpoints[:limit]),
+        "checkpoints": checkpoints[:limit],
     }
 
 

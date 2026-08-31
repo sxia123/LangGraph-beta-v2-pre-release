@@ -39,6 +39,14 @@
 
       <!-- SIDEBAR FOOTER (Memory Manager & Status) -->
       <div class="sidebar-footer">
+        <button class="sidebar-nav-item" id="openToolsModalBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+          </svg>
+          <span class="nav-label">Tools & Skills</span>
+          <span class="memory-badge" id="toolsBadge">0</span>
+        </button>
+
         <button class="sidebar-nav-item" id="openMemoryModalBtn">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 2a4 4 0 0 1 4 4c0 1.1-.5 2.1-1.2 2.8L12 11l-2.8-2.2A4 4 0 0 1 12 2z"/>
@@ -142,6 +150,15 @@
               </button>
             </div>
           </div>
+
+          <!-- TOOLS REGISTRY BUTTON -->
+          <button class="control-btn" id="topbarToolsBtn" title="Inspect & Test Available Tools">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+            </svg>
+            <span id="topbarToolsLabel">Tools</span>
+            <span class="tools-topbar-pill" id="topbarToolsBadge">0</span>
+          </button>
 
           <!-- PERSISTENT MEMORY TOGGLE -->
           <button class="control-btn toggle-btn active" id="memoryToggleBtn" title="Toggle Persistent Memory Context">
@@ -303,6 +320,86 @@
       <div class="modal-footer">
         <button class="btn-danger" id="clearAllMemoriesBtn">Clear all memory</button>
         <button class="btn-secondary" id="doneMemoryModalBtn">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOOLS REGISTRY & DIAGNOSTICS MODAL -->
+  <div class="modal-wrapper" id="toolsModal">
+    <div class="modal-backdrop" id="toolsModalBackdrop"></div>
+    <div class="modal-card modal-card-wide">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <h3>Tools & Imperative Skills</h3>
+          <p class="modal-subtitle">Directly execute, inspect, and test tools with automated pre- and post-tool SQLite checkpoints.</p>
+        </div>
+        <button class="modal-close-btn" id="closeToolsModalBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <!-- TABS -->
+      <div class="modal-tabs-header">
+        <button class="modal-tab-btn active" data-tab="catalog" id="tabBtnCatalog">Active Tools (<span id="tabToolsCount">0</span>)</button>
+        <button class="modal-tab-btn" data-tab="tester" id="tabBtnTester">Interactive Tool Runner</button>
+        <button class="modal-tab-btn" data-tab="checkpoints" id="tabBtnCheckpoints">Tool Checkpoints Log</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- TAB 1: TOOLS CATALOG -->
+        <div class="tab-pane active" id="tabPaneCatalog">
+          <div class="tools-grid" id="toolsGrid">
+            <div class="loading-spinner">Loading registered tools...</div>
+          </div>
+        </div>
+
+        <!-- TAB 2: INTERACTIVE TOOL RUNNER -->
+        <div class="tab-pane" id="tabPaneTester" style="display: none;">
+          <div class="tool-tester-container">
+            <div class="tester-form-row">
+              <label for="testerToolSelect">Select Tool:</label>
+              <select id="testerToolSelect" class="form-select"></select>
+            </div>
+            <div class="tester-form-row">
+              <label for="testerToolArgs">Arguments (JSON format):</label>
+              <textarea id="testerToolArgs" class="form-textarea" rows="4" placeholder='{"query": "LangGraph multi-agent"}'></textarea>
+            </div>
+            <div class="tester-actions">
+              <button type="button" class="btn-primary" id="runToolTesterBtn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                <span>Run Tool with Checkpoint</span>
+              </button>
+            </div>
+            <div class="tester-output-box" id="testerOutputBox" style="display: none;">
+              <div class="output-header">
+                <span class="output-title">Execution Result</span>
+                <span class="output-status-badge" id="testerStatusBadge">SUCCESS</span>
+              </div>
+              <pre class="output-pre" id="testerOutputContent"></pre>
+              <div class="output-footer" id="testerCheckpointFooter"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 3: CHECKPOINTS LOG -->
+        <div class="tab-pane" id="tabPaneCheckpoints" style="display: none;">
+          <div class="checkpoints-filter-bar">
+            <input type="text" id="checkpointsFilterInput" placeholder="Filter checkpoints by tool name or run ID...">
+            <button class="btn-secondary" id="refreshCheckpointsBtn">Refresh</button>
+          </div>
+          <div class="checkpoints-list" id="checkpointsList">
+            <div class="loading-spinner">Loading checkpoints...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" id="doneToolsModalBtn">Done</button>
       </div>
     </div>
   </div>

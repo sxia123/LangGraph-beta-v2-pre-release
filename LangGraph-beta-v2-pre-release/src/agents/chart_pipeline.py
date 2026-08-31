@@ -677,12 +677,33 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
 
         is_blocked = "deny_action" in task.lower() or not state.get("final_answer_verified", True)
         existing_payload = state.get("action_payload") or {}
+        tool_name = existing_payload.get("tool")
+        tool_args = existing_payload.get("tool_args") or {}
+
+        if not tool_name:
+            import json
+            import re
+            json_matches = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", solution)
+            if not json_matches:
+                raw_match = re.search(r"(\{\s*\"(?:tool|name)\"\s*:\s*\"[^\"]+\"[\s\S]*?\})", solution)
+                if raw_match:
+                    json_matches = [raw_match.group(1)]
+            for j_str in json_matches:
+                try:
+                    parsed = json.loads(j_str)
+                    if isinstance(parsed, dict) and ("tool" in parsed or "name" in parsed):
+                        tool_name = parsed.get("tool") or parsed.get("name")
+                        tool_args = parsed.get("args") or parsed.get("parameters") or {}
+                        break
+                except Exception:
+                    pass
+
         payload = {
             "target_action": existing_payload.get("target_action", "execute_solution"),
             "payload_summary": existing_payload.get("payload_summary") or (solution[:200] + "..." if len(solution) > 200 else solution),
             "requires_approval": existing_payload.get("requires_approval", True),
-            "tool": existing_payload.get("tool"),
-            "tool_args": existing_payload.get("tool_args") or {},
+            "tool": tool_name,
+            "tool_args": tool_args,
         }
 
 

@@ -193,10 +193,20 @@ class ToolLoader:
 
     def _tool_python_repl(self, code: str) -> Dict[str, Any]:
         try:
-            from langchain_experimental.utilities import PythonREPL
-            repl = PythonREPL()
-            res = repl.run(code)
-            return {"ok": True, "message": res if res else "Code executed successfully with no stdout output.", "returncode": 0}
+            try:
+                from langchain_experimental.utilities import PythonREPL
+                repl = PythonREPL()
+                res = repl.run(code)
+                return {"ok": True, "message": res if res else "Code executed successfully with no stdout output.", "returncode": 0}
+            except (ImportError, ModuleNotFoundError):
+                import contextlib
+                import io
+                stdout_buf = io.StringIO()
+                exec_globals: Dict[str, Any] = {"__name__": "__main__"}
+                with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stdout_buf):
+                    exec(code, exec_globals)
+                out = stdout_buf.getvalue().strip()
+                return {"ok": True, "message": out if out else "Code executed successfully with no stdout output.", "returncode": 0}
         except Exception as err:
             return {"ok": False, "message": f"Python REPL execution error: {err}", "returncode": None}
 

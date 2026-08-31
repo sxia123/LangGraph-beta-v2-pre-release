@@ -1,7 +1,12 @@
 from dataclasses import dataclass
+from enum import Enum
 from typing import Callable
 
-from contracts import ActionRisk
+
+class ActionRisk(str, Enum):
+    READ_ONLY = "read_only"
+    WRITE = "write"
+    HIGH_RISK = "high_risk"
 
 
 @dataclass
