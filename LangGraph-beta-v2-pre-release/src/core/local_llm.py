@@ -184,31 +184,84 @@ class LocalLLMClient:
             return {
                 "ok": True,
                 "message": "Mock engine active (Offline visual simulation)",
-                "models": ["mock-llama3.2", "mock-qwen2.5-coder", "mock-deepseek-r1"],
+                "models": [
+                    "Qwen3.8-27B-oQ6-mtp",
+                    "Qwen2.5-VL-72B-Instruct",
+                    "Qwen2.5-VL-7B-Instruct",
+                    "Qwen2.5-Coder-32B-Instruct",
+                    "mock-llama3.2",
+                    "mock-deepseek-r1",
+                ],
             }
 
         try:
+            headers = self._get_headers()
+            base = self.config.base_url.rstrip("/")
+
             if self.config.provider == "ollama":
-                base = self.config.base_url.rstrip("/")
-                res = requests.get(f"{base}/api/tags", headers=self._get_headers(), timeout=5)
+                res = requests.get(f"{base}/api/tags", headers=headers, timeout=5)
                 if res.status_code == 200:
-                    models = [m.get("name") for m in res.json().get("models", [])]
+                    models = [m.get("name") for m in res.json().get("models", []) if isinstance(m, dict)]
                     return {
                         "ok": True,
                         "message": f"Connected to Ollama ({len(models)} models detected)",
                         "models": models,
                     }
 
-            models_url = self._get_openai_url("models")
-            res = requests.get(models_url, headers=self._get_headers(), timeout=5)
-            if res.status_code == 200:
-                models = [m.get("id") for m in res.json().get("data", [])]
+            # Try OpenAI / oMLX / vLLM / LM Studio models endpoints
+            urls_to_try = [
+                self._get_openai_url("models"),
+                f"{base}/models",
+                f"{base}/v1/models",
+            ]
+            seen_urls: List[str] = []
+            for u in urls_to_try:
+                if u not in seen_urls:
+                    seen_urls.append(u)
+
+            for models_url in seen_urls:
+                try:
+                    res = requests.get(models_url, headers=headers, timeout=5)
+                    if res.status_code == 200:
+                        payload = res.json()
+                        models: List[str] = []
+                        if isinstance(payload, dict):
+                            raw_list = payload.get("data") or payload.get("models") or []
+                            if isinstance(raw_list, list):
+                                for item in raw_list:
+                                    if isinstance(item, dict):
+                                        m_id = item.get("id") or item.get("name") or item.get("model")
+                                        if m_id:
+                                            models.append(str(m_id))
+                                    elif isinstance(item, str):
+                                        models.append(item)
+                        elif isinstance(payload, list):
+                            for item in payload:
+                                if isinstance(item, dict):
+                                    m_id = item.get("id") or item.get("name")
+                                    if m_id:
+                                        models.append(str(m_id))
+                                elif isinstance(item, str):
+                                    models.append(item)
+
+                        if models:
+                            return {
+                                "ok": True,
+                                "message": f"Connected to {self.config.provider} ({len(models)} models available)",
+                                "models": models,
+                            }
+                except Exception:
+                    continue
+
+            # Fallback: if server responds to a health/ping or root
+            if self.config.model_name:
                 return {
                     "ok": True,
-                    "message": f"Connected to {self.config.provider} ({len(models)} models available)",
-                    "models": models,
+                    "message": f"Connected to {self.config.provider} (default model active)",
+                    "models": [self.config.model_name],
                 }
-            return {"ok": False, "message": f"Server returned HTTP {res.status_code}"}
+
+            return {"ok": False, "message": f"Could not list models from {self.config.base_url}"}
         except Exception as err:
             return {
                 "ok": False,

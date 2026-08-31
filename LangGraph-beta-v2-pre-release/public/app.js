@@ -107,6 +107,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // =========================================================================
   // 1. Check Local LLM Status & Available Models
   // =========================================================================
+  // =========================================================================
+  // 1. Check Local LLM Status & Available Models
+  // =========================================================================
   async function checkServerStatus() {
     try {
       const res = await fetch('/api/status');
@@ -116,7 +119,7 @@ document.addEventListener('DOMContentLoaded', () => {
         statusBullet.className = 'status-bullet online';
         statusTitle.textContent = `${data.provider.toUpperCase()} Online`;
         statusDetails.textContent = `${data.model_name}`;
-        if (data.model_name && activeModel === 'Qwen3.8-27B-oQ6-mtp') {
+        if (data.model_name && (!activeModel || activeModel === 'Qwen3.8-27B-oQ6-mtp')) {
           activeModel = data.model_name;
           currentModelLabel.textContent = formatModelLabel(data.model_name);
         }
@@ -125,6 +128,15 @@ document.addEventListener('DOMContentLoaded', () => {
         statusTitle.textContent = 'oMLX Offline (Mock Ready)';
         statusDetails.textContent = `${data.base_url}`;
       }
+
+      if (data.tools_count !== undefined) {
+        if (toolsBadge) toolsBadge.textContent = data.tools_count;
+        if (topbarToolsBadge) topbarToolsBadge.textContent = data.tools_count;
+      }
+
+      // Populate models dynamically from oMLX / LLM server
+      const detectedModels = data.models || (data.connection && data.connection.models) || [];
+      renderModelDropdown(detectedModels);
     } catch {
       statusBullet.className = 'status-bullet';
       statusTitle.textContent = 'Server Disconnected';
@@ -133,11 +145,117 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function formatModelLabel(modelId) {
+    if (!modelId) return 'Select Model';
     if (modelId.includes('Qwen3.8-27B')) return 'Qwen 3.8 27B';
     if (modelId.includes('Qwen2.5-VL-72B')) return 'Qwen 2.5 VL 72B';
     if (modelId.includes('Qwen2.5-VL-7B')) return 'Qwen 2.5 VL 7B';
     if (modelId.includes('Qwen2.5-Coder-32B')) return 'Qwen 2.5 Coder 32B';
-    return modelId.split('/')[0].split('-').slice(0, 3).join(' ');
+    if (modelId.toLowerCase().includes('deepseek-r1')) return 'DeepSeek R1';
+    if (modelId.toLowerCase().includes('llama-3.2') || modelId.toLowerCase().includes('llama3.2')) return 'Llama 3.2';
+
+    // Format clean readable label from path or repo ID
+    const clean = modelId.includes('/') ? modelId.split('/').pop() : modelId;
+    return clean;
+  }
+
+  function renderModelDropdown(modelsList) {
+    if (!modelDropdownMenu) return;
+    let list = Array.isArray(modelsList) ? [...modelsList] : [];
+    if (list.length === 0) {
+      list = [
+        'Qwen3.8-27B-oQ6-mtp',
+        'Qwen2.5-VL-72B-Instruct',
+        'Qwen2.5-VL-7B-Instruct',
+        'Qwen2.5-Coder-32B-Instruct',
+      ];
+    }
+
+    if (activeModel && !list.includes(activeModel)) {
+      list.unshift(activeModel);
+    }
+
+    modelDropdownMenu.innerHTML = '';
+    const header = document.createElement('div');
+    header.className = 'dropdown-header';
+    header.textContent = `oMLX Models (${list.length})`;
+    modelDropdownMenu.appendChild(header);
+
+    list.forEach((mId) => {
+      const btn = document.createElement('button');
+      btn.className = `dropdown-item ${mId === activeModel ? 'active' : ''}`;
+      btn.setAttribute('data-model', mId);
+
+      const title = formatModelLabel(mId);
+      const isDefault = mId === activeModel;
+
+      btn.innerHTML = `
+        <div class="item-title">${escapeHtml(title)} ${isDefault ? '(Active)' : ''}</div>
+        <div class="item-desc" style="font-family: var(--font-mono); font-size: 10.5px; opacity: 0.75;">${escapeHtml(mId)}</div>
+      `;
+
+      btn.addEventListener('click', async () => {
+        modelDropdownMenu.querySelectorAll('.dropdown-item').forEach((i) => i.classList.remove('active'));
+        btn.classList.add('active');
+        activeModel = mId;
+        currentModelLabel.textContent = title;
+        modelDropdownMenu.classList.remove('show');
+
+        try {
+          await fetch('/api/models/select', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: mId }),
+          });
+        } catch {
+          // Ignore
+        }
+      });
+
+      modelDropdownMenu.appendChild(btn);
+    });
+
+    // Custom model input row
+    const customRow = document.createElement('div');
+    customRow.className = 'dropdown-custom-input-row';
+    customRow.innerHTML = `
+      <input type="text" class="dropdown-custom-input" id="customModelInput" placeholder="Custom model ID...">
+      <button type="button" class="dropdown-custom-btn" id="applyCustomModelBtn">Set</button>
+    `;
+
+    customRow.addEventListener('click', (e) => {
+      e.stopPropagation();
+    });
+
+    const customInput = customRow.querySelector('#customModelInput');
+    const applyBtn = customRow.querySelector('#applyCustomModelBtn');
+
+    const applyCustomModel = async () => {
+      const val = customInput.value.trim();
+      if (!val) return;
+      activeModel = val;
+      currentModelLabel.textContent = formatModelLabel(val);
+      renderModelDropdown([...list, val]);
+      modelDropdownMenu.classList.remove('show');
+      try {
+        await fetch('/api/models/select', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model_name: val }),
+        });
+      } catch {
+        // Ignore
+      }
+    };
+
+    applyBtn.addEventListener('click', applyCustomModel);
+    customInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        applyCustomModel();
+      }
+    });
+
+    modelDropdownMenu.appendChild(customRow);
   }
 
   checkServerStatus();
@@ -195,16 +313,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('click', () => {
     modelDropdownMenu.classList.remove('show');
     pipelineDropdownMenu.classList.remove('show');
-  });
-
-  modelDropdownMenu.querySelectorAll('.dropdown-item').forEach((item) => {
-    item.addEventListener('click', () => {
-      modelDropdownMenu.querySelectorAll('.dropdown-item').forEach((i) => i.classList.remove('active'));
-      item.classList.add('active');
-      activeModel = item.getAttribute('data-model');
-      currentModelLabel.textContent = item.querySelector('.item-title').textContent.split('(')[0].trim();
-      modelDropdownMenu.classList.remove('show');
-    });
   });
 
   pipelineDropdownMenu.querySelectorAll('.dropdown-item').forEach((item) => {

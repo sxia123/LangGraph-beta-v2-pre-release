@@ -258,12 +258,20 @@ class ToolRunRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class ModelSelectRequest(BaseModel):
+    model_name: str
+
+
 @app.get("/api/status")
 def get_status():
     """Returns local LLM provider configuration, connection status, and tool availability."""
     conn = llm_client.ping()
     tools = get_tool_loader(llm_client)
     tool_names = tools.list_tools()
+    detected_models = conn.get("models") or []
+    if not detected_models and llm_client.config.model_name:
+        detected_models = [llm_client.config.model_name]
+
     return {
         "provider": llm_client.config.provider,
         "base_url": llm_client.config.base_url,
@@ -272,8 +280,34 @@ def get_status():
         "supported_workflows": SUPPORTED_WORKFLOWS,
         "tools_count": len(tool_names),
         "available_tools": tool_names,
+        "models": detected_models,
         "connection": conn,
     }
+
+
+@app.get("/api/models")
+def list_models_endpoint():
+    """Returns all models detected from the connected local LLM server (oMLX/OpenAI/Ollama)."""
+    conn = llm_client.ping()
+    detected_models = conn.get("models") or []
+    if not detected_models and llm_client.config.model_name:
+        detected_models = [llm_client.config.model_name]
+    return {
+        "ok": conn.get("ok", False),
+        "current_model": llm_client.config.model_name,
+        "models": detected_models,
+        "provider": llm_client.config.provider,
+        "base_url": llm_client.config.base_url,
+    }
+
+
+@app.post("/api/models/select")
+def select_model_endpoint(req: ModelSelectRequest):
+    """Sets the active default model on the server."""
+    model = req.model_name.strip()
+    if model:
+        llm_client.config.model_name = model
+    return {"ok": True, "model_name": llm_client.config.model_name}
 
 
 @app.get("/api/tools")

@@ -130,3 +130,30 @@ def test_direct_chat_tool_execution():
     # Check checkpoints in database
     checkpoints = get_tool_checkpoints(run_id=run_id, tool_name="math_eval")
     assert len(checkpoints) >= 2
+
+
+def test_api_models_endpoint():
+    client = TestClient(app)
+    response = client.get("/api/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("ok") is True
+    models = data.get("models", [])
+    assert len(models) >= 1
+    assert "Qwen3.8-27B-oQ6-mtp" in models or any("qwen" in m.lower() for m in models)
+
+
+def test_api_models_select_endpoint():
+    client = TestClient(app)
+    target_model = "Qwen2.5-Coder-32B-Instruct"
+    response = client.post("/api/models/select", json={"model_name": target_model})
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("ok") is True
+    assert data.get("model_name") == target_model
+
+    # Check status endpoint reflects it
+    status_res = client.get("/api/status")
+    assert status_res.status_code == 200
+    assert status_res.json().get("model_name") == target_model
+
