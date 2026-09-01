@@ -12,6 +12,25 @@ dist
 dist-ssr
 *.local
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+venv/
+ENV/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+*.db
+*.sqlite
+*.sqlite3
+test_ollama_output.txt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

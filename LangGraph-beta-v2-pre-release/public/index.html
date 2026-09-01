@@ -182,6 +182,29 @@
               </svg>
             </div>
             <h2>What can I help with?</h2>
+
+            <!-- AVAILABLE TOOLS SHOWCASE -->
+            <div class="empty-tools-section" id="emptyToolsSection">
+              <div class="empty-tools-header">
+                <div class="empty-tools-title">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                  </svg>
+                  <span>Active Agent Tools & Imperative Skills</span>
+                  <span class="empty-tools-badge" id="emptyToolsCount">16</span>
+                </div>
+                <button type="button" class="empty-tools-explore-btn" id="emptyToolsExploreBtn">
+                  <span>Open Full Tools Studio</span>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                  </svg>
+                </button>
+              </div>
+              <div class="empty-tools-pills" id="emptyToolsPills">
+                <div class="loading-spinner-sm">Loading tools...</div>
+              </div>
+            </div>
+
             <div class="prompt-suggestions">
               <button class="suggestion-card" data-prompt="Analyze this image in detail and describe what is happening.">
                 <div class="card-title">Analyze visual content</div>
@@ -226,6 +249,14 @@
                 <line x1="12" y1="5" x2="12" y2="19"></line>
                 <line x1="5" y1="12" x2="19" y2="12"></line>
               </svg>
+            </button>
+
+            <button type="button" class="inline-tools-btn" id="inlineToolsBtn" title="Inspect & Test Available Tools">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+              </svg>
+              <span>Tools</span>
+              <span class="inline-tools-badge" id="inlineToolsBadge">16</span>
             </button>
 
             <textarea
@@ -369,6 +400,23 @@
       <div class="modal-body">
         <!-- TAB 1: TOOLS CATALOG -->
         <div class="tab-pane active" id="tabPaneCatalog">
+          <div class="tools-search-bar">
+            <div class="tools-search-input-wrapper">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              <input type="text" id="toolsSearchInput" placeholder="Search tools by name, description, or parameter..." class="tools-search-input">
+            </div>
+            <div class="tools-category-filters" id="toolsCategoryFilters">
+              <button type="button" class="tool-cat-btn active" data-cat="all">All (<span id="catCountAll">16</span>)</button>
+              <button type="button" class="tool-cat-btn" data-cat="search">Search & Web</button>
+              <button type="button" class="tool-cat-btn" data-cat="code">Code & REPL</button>
+              <button type="button" class="tool-cat-btn" data-cat="docs">Doc Parsing</button>
+              <button type="button" class="tool-cat-btn" data-cat="files">File Operations</button>
+              <button type="button" class="tool-cat-btn" data-cat="git">Git Control</button>
+            </div>
+          </div>
           <div class="tools-grid" id="toolsGrid">
             <div class="loading-spinner">Loading registered tools...</div>
           </div>

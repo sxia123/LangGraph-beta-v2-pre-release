@@ -63,6 +63,15 @@ document.addEventListener('DOMContentLoaded', () => {
   // Tools Modal & Controls
   const openToolsModalBtn = document.getElementById('openToolsModalBtn');
   const topbarToolsBtn = document.getElementById('topbarToolsBtn');
+  const inlineToolsBtn = document.getElementById('inlineToolsBtn');
+  const inlineToolsBadge = document.getElementById('inlineToolsBadge');
+  const emptyToolsSection = document.getElementById('emptyToolsSection');
+  const emptyToolsPills = document.getElementById('emptyToolsPills');
+  const emptyToolsCount = document.getElementById('emptyToolsCount');
+  const emptyToolsExploreBtn = document.getElementById('emptyToolsExploreBtn');
+  const toolsSearchInput = document.getElementById('toolsSearchInput');
+  const toolsCategoryFilters = document.getElementById('toolsCategoryFilters');
+  const catCountAll = document.getElementById('catCountAll');
   const toolsModal = document.getElementById('toolsModal');
   const toolsModalBackdrop = document.getElementById('toolsModalBackdrop');
   const closeToolsModalBtn = document.getElementById('closeToolsModalBtn');
@@ -401,14 +410,18 @@ document.addEventListener('DOMContentLoaded', () => {
       };
       reader.readAsDataURL(file);
     } else {
-      // Read text/code/document files
+      const isBinaryDoc = /\.(xlsx|xls|xlsm|docx|pptx|pdf|zip|tar|gz|bin)$/i.test(file.name) ||
+                          file.type.includes('spreadsheet') ||
+                          file.type.includes('excel') ||
+                          file.type.includes('officedocument');
+
       const reader = new FileReader();
       reader.onload = (e) => {
         stagedFiles.push({
           filename: file.name,
           content: e.target.result,
           size: file.size,
-          type: file.type || 'text/plain',
+          type: file.type || (isBinaryDoc ? 'application/octet-stream' : 'text/plain'),
         });
         renderStagedAttachments();
       };
@@ -425,7 +438,12 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         binReader.readAsDataURL(file);
       };
-      reader.readAsText(file);
+
+      if (isBinaryDoc) {
+        reader.readAsDataURL(file);
+      } else {
+        reader.readAsText(file);
+      }
     }
   }
 
@@ -1314,6 +1332,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // =========================================================================
   // 8. Tools Registry, Diagnostics & Interactive Tester
   // =========================================================================
+  let currentToolsCategory = 'all';
+  let currentToolsSearch = '';
+
   if (openToolsModalBtn) {
     openToolsModalBtn.addEventListener('click', () => {
       openToolsModal();
@@ -1322,6 +1343,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (topbarToolsBtn) {
     topbarToolsBtn.addEventListener('click', () => {
+      openToolsModal();
+    });
+  }
+
+  if (inlineToolsBtn) {
+    inlineToolsBtn.addEventListener('click', () => {
+      openToolsModal();
+    });
+  }
+
+  if (emptyToolsExploreBtn) {
+    emptyToolsExploreBtn.addEventListener('click', () => {
       openToolsModal();
     });
   }
@@ -1345,12 +1378,55 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openToolsModal() {
-    toolsModal.classList.add('open');
+    if (toolsModal) {
+      toolsModal.classList.add('active');
+      toolsModal.classList.add('open');
+    }
     fetchTools();
   }
 
   function closeToolsModal() {
-    toolsModal.classList.remove('open');
+    if (toolsModal) {
+      toolsModal.classList.remove('active');
+      toolsModal.classList.remove('open');
+    }
+  }
+
+  function getToolCategory(toolName) {
+    if (['web_search', 'wikipedia', 'arxiv', 'web_scrape'].includes(toolName)) return 'search';
+    if (['python_repl', 'math_eval'].includes(toolName)) return 'code';
+    if (['doc_convert', 'docling_parse'].includes(toolName)) return 'docs';
+    if (['file_write', 'file_edit', 'vector_memory'].includes(toolName)) return 'files';
+    if (toolName.startsWith('github_')) return 'git';
+    return 'other';
+  }
+
+  function getToolCategoryLabel(cat) {
+    const labels = {
+      search: 'Search & Web',
+      code: 'Code & Execution',
+      docs: 'Doc Parsing',
+      files: 'Files & Checkpoint',
+      git: 'Git Control',
+      other: 'Utility',
+    };
+    return labels[cat] || cat;
+  }
+
+  function getToolIcon(toolName) {
+    if (toolName === 'web_search') return '🔍';
+    if (toolName === 'wikipedia') return '📖';
+    if (toolName === 'arxiv') return '📑';
+    if (toolName === 'python_repl') return '🐍';
+    if (toolName === 'math_eval') return '➗';
+    if (toolName === 'web_scrape') return '🌐';
+    if (toolName === 'doc_convert') return '📄';
+    if (toolName === 'docling_parse') return '📑';
+    if (toolName === 'vector_memory') return '🧠';
+    if (toolName === 'file_write') return '✏️';
+    if (toolName === 'file_edit') return '📝';
+    if (toolName.startsWith('github_')) return '🐙';
+    return '⚙️';
   }
 
   // Tab Switching
@@ -1385,8 +1461,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (toolsBadge) toolsBadge.textContent = count;
       if (topbarToolsBadge) topbarToolsBadge.textContent = count;
       if (tabToolsCount) tabToolsCount.textContent = count;
+      if (emptyToolsCount) emptyToolsCount.textContent = count;
+      if (inlineToolsBadge) inlineToolsBadge.textContent = count;
+      if (catCountAll) catCountAll.textContent = count;
 
-      renderToolsCatalog(registeredTools);
+      renderEmptyToolsPills(registeredTools);
+      renderToolsCatalog(registeredTools, currentToolsSearch, currentToolsCategory);
       populateTesterSelect(registeredTools);
     } catch {
       if (toolsGrid) {
@@ -1395,17 +1475,84 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function renderToolsCatalog(tools) {
+  function renderEmptyToolsPills(tools) {
+    if (!emptyToolsPills) return;
+    if (!tools || tools.length === 0) {
+      emptyToolsPills.innerHTML = '<span style="color: var(--text-faint); font-size: 12px;">No tools loaded.</span>';
+      return;
+    }
+
+    emptyToolsPills.innerHTML = '';
+    tools.forEach((t) => {
+      const cat = getToolCategory(t.name);
+      const icon = getToolIcon(t.name);
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `empty-tool-chip cat-${cat}`;
+      chip.title = `${t.name}: ${t.description || 'Click to test or insert sample prompt'}`;
+      chip.innerHTML = `
+        <span class="chip-icon">${icon}</span>
+        <span class="chip-name">${escapeHtml(t.name)}</span>
+      `;
+
+      chip.addEventListener('click', () => {
+        // Insert helpful sample prompt in chat textarea
+        if (chatTextarea) {
+          if (t.name === 'math_eval') {
+            chatTextarea.value = 'Calculate (45 * 12) + 8 using math tools and explain the result in one sentence.';
+          } else if (t.name === 'web_search') {
+            chatTextarea.value = 'Search the web for the latest LangGraph agent architecture in 2026.';
+          } else if (t.name === 'python_repl') {
+            chatTextarea.value = 'Run Python code to calculate the first 10 Fibonacci numbers.';
+          } else if (t.name === 'wikipedia') {
+            chatTextarea.value = 'Look up LangGraph and agentic AI on Wikipedia.';
+          } else if (t.name === 'arxiv') {
+            chatTextarea.value = 'Search ArXiv for recent papers on multi-agent collaboration.';
+          } else if (t.name === 'file_write' || t.name === 'file_edit') {
+            chatTextarea.value = 'Create a new python file named summary_output.py with a hello world function.';
+          } else {
+            chatTextarea.value = `Please execute the ${t.name} tool.`;
+          }
+          chatTextarea.focus();
+          adjustTextareaHeight();
+          checkSendButtonState();
+        }
+      });
+
+      emptyToolsPills.appendChild(chip);
+    });
+  }
+
+  function renderToolsCatalog(tools, filterQuery = '', category = 'all') {
     if (!toolsGrid) return;
     if (!tools || tools.length === 0) {
       toolsGrid.innerHTML = '<div class="loading-spinner">No tools currently registered.</div>';
       return;
     }
 
+    const q = (filterQuery || '').toLowerCase().trim();
+    const filtered = tools.filter((t) => {
+      const matchCat = category === 'all' || getToolCategory(t.name) === category;
+      if (!matchCat) return false;
+      if (!q) return true;
+      const inName = t.name.toLowerCase().includes(q);
+      const inDesc = (t.description || '').toLowerCase().includes(q);
+      const inParams = (t.params || []).some((p) => p.toLowerCase().includes(q));
+      return inName || inDesc || inParams;
+    });
+
+    if (filtered.length === 0) {
+      toolsGrid.innerHTML = `<div style="grid-column: 1/-1; color: var(--text-muted); font-size: 13px; padding: 24px; text-align: center;">No tools matching "${escapeHtml(filterQuery)}" in category "${escapeHtml(category)}".</div>`;
+      return;
+    }
+
     toolsGrid.innerHTML = '';
-    tools.forEach((t) => {
+    filtered.forEach((t) => {
+      const cat = getToolCategory(t.name);
+      const catLabel = getToolCategoryLabel(cat);
+      const icon = getToolIcon(t.name);
       const card = document.createElement('div');
-      card.className = 'tool-card';
+      card.className = `tool-card tool-cat-${cat}`;
 
       let paramsHtml = '';
       if (t.params && t.params.length > 0) {
@@ -1420,18 +1567,60 @@ document.addEventListener('DOMContentLoaded', () => {
 
       card.innerHTML = `
         <div class="tool-card-top">
-          <span class="tool-name-badge">${escapeHtml(t.name)}</span>
-          <button type="button" class="tool-test-btn" data-tool="${escapeHtml(t.name)}">Test Tool</button>
+          <div class="tool-card-identity">
+            <span class="tool-icon-span">${icon}</span>
+            <span class="tool-name-badge">${escapeHtml(t.name)}</span>
+          </div>
+          <span class="tool-category-badge cat-${cat}">${catLabel}</span>
         </div>
         <div class="tool-desc">${escapeHtml(t.description || 'No description provided.')}</div>
         ${paramsHtml}
+        <div class="tool-card-actions">
+          <button type="button" class="tool-test-btn" data-tool="${escapeHtml(t.name)}">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span>Test in Runner</span>
+          </button>
+          <button type="button" class="tool-prompt-btn" data-tool="${escapeHtml(t.name)}">Use in Chat</button>
+        </div>
       `;
 
       card.querySelector('.tool-test-btn').addEventListener('click', () => {
         selectToolInTester(t.name);
       });
 
+      card.querySelector('.tool-prompt-btn').addEventListener('click', () => {
+        closeToolsModal();
+        if (chatTextarea) {
+          chatTextarea.value = `Please execute the ${t.name} tool.`;
+          chatTextarea.focus();
+          adjustTextareaHeight();
+          checkSendButtonState();
+        }
+      });
+
       toolsGrid.appendChild(card);
+    });
+  }
+
+  // Search & category filter event listeners
+  if (toolsSearchInput) {
+    toolsSearchInput.addEventListener('input', (e) => {
+      currentToolsSearch = e.target.value;
+      renderToolsCatalog(registeredTools, currentToolsSearch, currentToolsCategory);
+    });
+  }
+
+  if (toolsCategoryFilters) {
+    const catButtons = toolsCategoryFilters.querySelectorAll('.tool-cat-btn');
+    catButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        catButtons.forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentToolsCategory = btn.dataset.cat || 'all';
+        renderToolsCatalog(registeredTools, currentToolsSearch, currentToolsCategory);
+      });
     });
   }
 

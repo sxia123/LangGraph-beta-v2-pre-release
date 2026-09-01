@@ -14,6 +14,7 @@ class ChartPipelineState(TypedDict, total=False):
     messages: Annotated[List[Dict[str, Any]], operator.add]
     user_input: str
     current_step: str
+    final_response: str
 
     # Intake
     goals: List[str]
@@ -51,7 +52,7 @@ class ChartPipelineState(TypedDict, total=False):
 
 
 def _get_input(state: ChartPipelineState) -> str:
-    user_input = state.get("user_input", "")
+    user_input = state.get("user_input", "") or state.get("user_query", "")
     if not user_input:
         messages = state.get("messages") or []
         if messages:
@@ -63,7 +64,9 @@ def _get_input(state: ChartPipelineState) -> str:
     return user_input or "Execute default workflow task."
 
 
-def create_chart_pipeline_graph(llm_client: LocalLLMClient):
+def create_chart_pipeline_graph(
+    llm_client: LocalLLMClient, checkpointer: Optional[Any] = None
+):
     workflow = StateGraph(ChartPipelineState)
 
     # Shared tool loader: every node runs tools (web search, wikipedia, arxiv, python REPL, ...)
@@ -96,8 +99,13 @@ def create_chart_pipeline_graph(llm_client: LocalLLMClient):
             **kwargs,
         )
 
-
-    def _search_context(query_or_state: Any, query: Optional[str] = None, state: Optional[ChartPipelineState] = None, max_results: int = 2, max_chars: int = 8000) -> str:
+    def _search_context(
+        query_or_state: Any,
+        query: Optional[str] = None,
+        state: Optional[ChartPipelineState] = None,
+        max_results: int = 5,
+        max_chars: int = 16000,
+    ) -> str:
         """Run the web_search tool via _execute_tool_with_checkpoint and return its result text."""
         if isinstance(query_or_state, dict):
             curr_state = query_or_state
@@ -106,10 +114,118 @@ def create_chart_pipeline_graph(llm_client: LocalLLMClient):
             actual_query = str(query_or_state)
             curr_state = state if isinstance(state, dict) else {}
 
-        res = _execute_tool_with_checkpoint(curr_state, "web_search", query=actual_query, max_results=max_results, max_chars=max_chars)
+        res = _execute_tool_with_checkpoint(
+            curr_state, "web_search", query=actual_query, max_results=max_results, max_chars=max_chars
+        )
         if res.get("ok"):
             return str(res.get("message", ""))
         return f"Web search unavailable — FLAG all claims as UNVERIFIED. ({res.get('message', '')})"
+
+    def _run_node_with_tools(
+        state: ChartPipelineState,
+        prompt: str,
+        agent_name: str,
+        model_name: Optional[str] = None,
+        max_tokens: int = 4096,
+    ) -> tuple[str, Optional[str], List[Dict[str, Any]]]:
+        """Executes LLM completion with tool calling capabilities and automatic SQLite checkpointing."""
+        res = llm_client.generate_completion(
+            prompt,
+            messages=[],
+            available_tools=tools.list_tools(),
+            max_tokens=max_tokens,
+            agent=agent_name,
+            model_name=model_name,
+        )
+        node_thoughts: List[Dict[str, Any]] = []
+        if res.thought:
+            node_thoughts.append(
+                {
+                    "agent": agent_name,
+                    "thought": res.thought,
+                    "timestamp": time.strftime("%H:%M:%S"),
+                }
+            )
+
+        # Check for tool calls
+        tool_calls = res.tool_calls or []
+        if not tool_calls:
+            import json
+            import re
+            json_matches = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", res.content)
+            if not json_matches:
+                raw_match = re.search(r"(\{\s*\"(?:tool|name)\"\s*:\s*\"[^\"]+\"[\s\S]*?\})", res.content)
+                if raw_match:
+                    json_matches = [raw_match.group(1)]
+            for j_str in json_matches:
+                try:
+                    parsed = json.loads(j_str)
+                    if isinstance(parsed, dict) and ("tool" in parsed or "name" in parsed):
+                        tool_calls.append(
+                            {
+                                "name": parsed.get("tool") or parsed.get("name"),
+                                "args": parsed.get("args") or parsed.get("parameters") or {},
+                            }
+                        )
+                        break
+                except Exception:
+                    pass
+
+        final_content = res.content
+        if tool_calls:
+            import json
+            for tc in tool_calls:
+                t_name = tc.get("name")
+                t_args = tc.get("args") or {}
+                if t_name:
+                    tool_res = _execute_tool_with_checkpoint(state, t_name, **t_args)
+                    cp_id = tool_res.get("checkpoint_id")
+                    post_id = tool_res.get("post_checkpoint_id")
+                    status_text = "SUCCESS" if tool_res.get("ok") else "FAILED"
+                    msg_text = tool_res.get("message", "")
+
+                    node_thoughts.append(
+                        {
+                            "agent": f"{agent_name} -> Tool: {t_name}",
+                            "thought": (
+                                f"**Tool Execution**: `{t_name}` ({status_text})\n"
+                                f"- **Arguments**: `{json.dumps(t_args)}`\n"
+                                f"- **Checkpoint**: `{post_id or cp_id or 'N/A'}`\n\n"
+                                f"**Result Preview**:\n```\n{str(msg_text)[:1200]}\n```"
+                            ),
+                            "tool": t_name,
+                            "args": t_args,
+                            "result": tool_res,
+                            "ok": tool_res.get("ok", False),
+                            "checkpoint_id": post_id or cp_id,
+                            "timestamp": time.strftime("%H:%M:%S"),
+                        }
+                    )
+
+                    synth_prompt = (
+                        f"{prompt}\n\n"
+                        f"Tool `{t_name}` execution result:\n```\n{msg_text}\n```\n\n"
+                        "Please incorporate this verified tool result into a clean, complete response for this stage."
+                    )
+                    synth_res = llm_client.generate_completion(
+                        synth_prompt,
+                        messages=[],
+                        max_tokens=max_tokens,
+                        agent=agent_name,
+                        model_name=model_name,
+                    )
+                    if synth_res.thought:
+                        node_thoughts.append(
+                            {
+                                "agent": f"{agent_name} Synthesis",
+                                "thought": synth_res.thought,
+                                "timestamp": time.strftime("%H:%M:%S"),
+                            }
+                        )
+                    final_content = synth_res.content
+                    break
+
+        return final_content, res.thought, node_thoughts
 
     # 1. INTAKE NODE
     def intake_node(state: ChartPipelineState) -> Dict[str, Any]:
@@ -133,7 +249,6 @@ def create_chart_pipeline_graph(llm_client: LocalLLMClient):
 
         run_id = state.get("run_id") or start_run("chart_pipeline", task)
         run_started_at = state.get("run_started_at") or datetime.now().isoformat(timespec="seconds")
-
 
         msg = {
             "id": f"msg_intake_{int(time.time() * 1000)}",
@@ -163,7 +278,6 @@ def create_chart_pipeline_graph(llm_client: LocalLLMClient):
 
     # BLOCKED END NODE (Intake failure)
     def blocked_end_node(state: ChartPipelineState) -> Dict[str, Any]:
-        # Close the run record so blocked requests are still tracked in SQLite.
         try:
             from src.core.memory_store import finish_run
 
@@ -185,48 +299,48 @@ def create_chart_pipeline_graph(llm_client: LocalLLMClient):
             "content": "🚫 **Workflow Terminated**: Request was blocked during intake due to clearance or scope violation.",
             "timestamp": time.strftime("%H:%M:%S"),
         }
-        return {"current_step": "blocked_end", "messages": [msg]}
+        return {"current_step": "blocked_end", "final_response": "Request blocked during intake.", "messages": [msg]}
 
     # 2. SPECIALIST NODE (Local AI)
     def specialist_node(state: ChartPipelineState) -> Dict[str, Any]:
         task = _get_input(state)
 
-        # Budgeted Web Search: execute web search with strict cap of 2 results
-        search_context = _search_context(task, max_results=5)
+        # Extended Web Search: execute web search with 5+ results
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         soul_prompt = load_soul("specialist", fallback_prompt="You are the Lead Specialist Agent.")
         prompt = f"""{soul_prompt}
 
-Available Tools (imperative — results are injected by the pipeline, not by you):
+Available Tools (you can call tools if needed to perform calculations, search, or run code):
 {tools.prompt_block()}
 
 Task: "{task}"
-Web Search Context (Budgeted - Max 2 Snippets):
-{search_context}"""
 
-        res = llm_client.generate_completion(
-            prompt,
-            messages=[],
-            available_tools=tools.list_tools(),
-            max_tokens=2048,
-            agent="specialist",
+Extended Web Search Context (Live Results):
+{search_context}
+
+Provide a clean, comprehensive, and well-structured technical solution."""
+
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="specialist", max_tokens=4096
         )
+
         msg = {
             "id": f"msg_spec_{int(time.time() * 1000)}",
             "sender": "Specialist Agent (Local AI)",
             "role": "assistant",
-            "content": f"### Specialist Solution Draft (Local AI)\n\n{res.content}",
+            "content": f"### Specialist Solution Draft (Local AI)\n\n{content}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
-            "specialist_output": res.content,
+            "specialist_output": content,
             "current_step": "specialist_complete",
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Specialist Agent",
-                    "thought": res.thought or "Gathered context (with budgeted web search) and committed local solution draft.",
+                    "thought": raw_thought or "Formulated technical draft solution with live search context and tool capabilities.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -270,42 +384,45 @@ Web Search Context (Budgeted - Max 2 Snippets):
         task = _get_input(state)
         specialist_output = state.get("specialist_output", "")
 
-        # MANDATORY Web Search: verify claims — web search is REQUIRED, not optional
-        search_context = _search_context(task, max_results=2, max_chars=3000)
+        # Extended Web Search
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         soul_prompt = load_soul("tier0_auditor", fallback_prompt="You are the Tier 0 Web Verification Auditor.")
         prompt = f"""{soul_prompt}
 
 ⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Any claim about events, releases, data, or developments after 2024 MUST be verified against current web search results.
 
+Available Tools:
+{tools.prompt_block()}
+
 Task: "{task}"
 
 Specialist Output to Verify:
 {specialist_output}
 
-Web Search Context (MANDATORY — Max 2 Snippets):
+Extended Web Search Context (Live Results):
 {search_context}
 
-MANDATORY: You MUST cross-reference the specialist output against the web search context. Do NOT rely on your own training data or internal knowledge — it is stale and may be outdated. Identify any factual claims that are inconsistent with the search results. Flag any claims about post-2024 events as UNVERIFIED if not corroborated by the search. Report which claims are corroborated, contradicted, or unverified."""
+MANDATORY: Cross-reference the specialist output against the web search context. Identify any factual claims that are inconsistent with the search results. Flag any claims about post-2024 events as UNVERIFIED if not corroborated by search. Report which claims are corroborated, contradicted, or unverified."""
 
-        res = llm_client.generate_completion(
-            prompt, messages=[], max_tokens=2048, agent="tier0_auditor"
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="tier0_auditor", max_tokens=4096
         )
 
         msg = {
             "id": f"msg_tier05_{int(time.time() * 1000)}",
             "sender": "Tier 0.5 Web Verification Node",
             "role": "assistant",
-            "content": f"### Tier 0.5 Web Verification\n\n{res.content}",
+            "content": f"### Tier 0.5 Web Verification\n\n{content}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Tier 0.5 Web Verifier",
-                    "thought": res.thought or "Cross-referenced specialist output against web search results for factual accuracy.",
+                    "thought": raw_thought or "Cross-referenced specialist output against web search results for factual accuracy.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -314,26 +431,28 @@ MANDATORY: You MUST cross-reference the specialist output against the web search
     # 4. TIER 1 VERIFY NODE
     def tier1_verify_node(state: ChartPipelineState) -> Dict[str, Any]:
         soul_prompt = load_soul("tier1_verifier", fallback_prompt="You are the Tier 1 Verification Auditor.")
-
-        # MANDATORY Web Search: verify claims — web search is REQUIRED, not optional
         task = _get_input(state)
-        search_context = _search_context(task, max_results=2, max_chars=3000)
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         prompt = f"""{soul_prompt}
 
-⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Your internal knowledge may be stale. You MUST rely on the web search context below to verify any claims about recent events, releases, data, or developments.
+⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Your internal knowledge may be stale. Rely on the live web search context below.
+
+Available Tools:
+{tools.prompt_block()}
 
 Output to Audit:
 {state.get("specialist_output", "")}
 
-Web Search Context (MANDATORY — Max 2 Snippets):
+Extended Web Search Context (Live Results):
 {search_context}
 
-MANDATORY: You MUST cross-reference key claims against the web search context. Do NOT rely on your own training data or internal knowledge — it may be outdated. Pay special attention to any claims about events, releases, or data after 2024. If a claim is not corroborated by the search results, mark it as UNVERIFIED. Respond with VERIFIED only if claims are corroborated, or REVISION REQUIRED if discrepancies are found."""
-        res = llm_client.generate_completion(
-            prompt, messages=[], max_tokens=1024, agent="tier1_verifier"
+MANDATORY: Cross-reference key claims against the web search context. Respond with VERIFIED only if claims are corroborated, or REVISION REQUIRED if discrepancies are found."""
+
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="tier1_verifier", max_tokens=4096
         )
-        is_verified = "VERIFIED" in res.content.upper() or "APPROVED" in res.content.upper()
+        is_verified = "VERIFIED" in content.upper() or "APPROVED" in content.upper()
         t0 = state.get("tier0_checks", {})
         converged = is_verified and all(t0.values()) if t0 else is_verified
 
@@ -341,19 +460,19 @@ MANDATORY: You MUST cross-reference key claims against the web search context. D
             "id": f"msg_tier1_{int(time.time() * 1000)}",
             "sender": "Tier 1 Verification Node",
             "role": "assistant",
-            "content": f"### Tier 1 Verification\n**Status**: {'VERIFIED' if is_verified else 'REVISION REQUIRED'}\n**Convergence**: {'CONVERGED' if converged else 'ESCALATION REQUIRED'}\n\n{res.content}",
+            "content": f"### Tier 1 Verification\n**Status**: {'VERIFIED' if is_verified else 'REVISION REQUIRED'}\n**Convergence**: {'CONVERGED' if converged else 'ESCALATION REQUIRED'}\n\n{content}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
             "tier1_verified": is_verified,
-            "tier1_result": res.content,
+            "tier1_result": content,
             "is_converged": converged,
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Tier 1 Auditor",
-                    "thought": res.thought or f"Tier 1 audit complete. Converged = {converged}.",
+                    "thought": raw_thought or f"Tier 1 audit complete. Converged = {converged}.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -364,9 +483,7 @@ MANDATORY: You MUST cross-reference key claims against the web search context. D
         task = _get_input(state)
         draft = state.get("specialist_output", "")
         tier1_result = state.get("tier1_result", "No Tier 1 feedback available.")
-
-        # MANDATORY Web Search: verify claims while revising
-        search_context = _search_context(task, max_results=2, max_chars=3000)
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         soul_prompt = load_soul(
             "specialist",
@@ -374,40 +491,44 @@ MANDATORY: You MUST cross-reference key claims against the web search context. D
         )
         prompt = f"""{soul_prompt}
 
-⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Your internal knowledge may be stale. You MUST rely on the web search context below to verify any claims about recent events, releases, data, or developments.
+⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025.
+
+Available Tools:
+{tools.prompt_block()}
 
 Task: "{task}"
 
 Current Draft:
 {draft}
 
-Tier 1 Auditor Feedback (address every point raised):
+Tier 1 Auditor Feedback:
 {tier1_result}
 
-Web Search Context (MANDATORY — Max 2 Snippets):
+Extended Web Search Context (Live Results):
 {search_context}
 
-MANDATORY: Produce a REVISED draft that resolves every discrepancy, correction, or UNVERIFIED flag called out by the Tier 1 auditor. Cross-reference all factual claims against the web search context. Do NOT rely on your own training data or internal knowledge — it may be outdated. Output ONLY the revised solution, with no commentary."""
+MANDATORY: Produce a REVISED draft that resolves every discrepancy or correction called out by the Tier 1 auditor. Output a clean, complete revised solution."""
 
-        res = llm_client.generate_completion(
-            prompt, messages=[], max_tokens=2048, agent="specialist"
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="specialist", max_tokens=4096
         )
+
         msg = {
             "id": f"msg_rev_{int(time.time() * 1000)}",
             "sender": "Revisions Node",
             "role": "assistant",
-            "content": f"### Revised Draft (post Tier 1 feedback)\n\n{res.content}",
+            "content": f"### Revised Draft (post Tier 1 feedback)\n\n{content}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
-            "revised_output": res.content,
-            "specialist_output": res.content,
+            "revised_output": content,
+            "specialist_output": content,
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Revisions Node",
-                    "thought": res.thought or "Applied Tier 1 auditor feedback and produced a revised draft.",
+                    "thought": raw_thought or "Applied Tier 1 auditor feedback and produced a revised draft.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -418,32 +539,31 @@ MANDATORY: Produce a REVISED draft that resolves every discrepancy, correction, 
         task = _get_input(state)
         revised = state.get("revised_output") or state.get("specialist_output", "")
         soul_prompt = load_soul("tier1_verifier", fallback_prompt="You are the Tier 2 Verification Auditor.")
-
-        # MANDATORY Web Search: verify claims — web search is REQUIRED, not optional
-        search_context = _search_context(task, max_results=2, max_chars=3000)
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         prompt = f"""{soul_prompt}
 
-⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Your internal knowledge may be stale. You MUST rely on the web search context below to verify any claims about recent events, releases, data, or developments.
+Available Tools:
+{tools.prompt_block()}
 
 Revised Output to Audit:
 {revised}
 
-Web Search Context (MANDATORY — Max 2 Snippets):
+Extended Web Search Context (Live Results):
 {search_context}
 
-MANDATORY: This is the second-pass (Tier 2) audit of the revised draft. You MUST cross-reference key claims against the web search context. Do NOT rely on your own training data or internal knowledge — it may be outdated. Pay special attention to any claims about events, releases, or data after 2024. If a claim is not corroborated by the search results, mark it as UNVERIFIED. Respond with VERIFIED only if claims are corroborated, or REVISION REQUIRED if discrepancies remain."""
+MANDATORY: Second-pass (Tier 2) audit. Respond with VERIFIED only if claims are corroborated, or REVISION REQUIRED if discrepancies remain."""
 
-        res = llm_client.generate_completion(
-            prompt, messages=[], max_tokens=1024, agent="tier1_verifier"
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="tier1_verifier", max_tokens=4096
         )
-        is_verified = "VERIFIED" in res.content.upper() or "APPROVED" in res.content.upper()
+        is_verified = "VERIFIED" in content.upper() or "APPROVED" in content.upper()
 
         msg = {
             "id": f"msg_tier2_{int(time.time() * 1000)}",
             "sender": "Tier 2 Verification Node",
             "role": "assistant",
-            "content": f"### Tier 2 Verification\n**Status**: {'VERIFIED' if is_verified else 'REVISION REQUIRED'}\n\n{res.content}",
+            "content": f"### Tier 2 Verification\n**Status**: {'VERIFIED' if is_verified else 'REVISION REQUIRED'}\n\n{content}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
@@ -451,10 +571,10 @@ MANDATORY: This is the second-pass (Tier 2) audit of the revised draft. You MUST
             "tier2_verified": is_verified,
             "is_converged": is_verified,
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Tier 2 Auditor",
-                    "thought": res.thought or f"Tier 2 audit complete. Verified = {is_verified}.",
+                    "thought": raw_thought or f"Tier 2 audit complete. Verified = {is_verified}.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -464,40 +584,40 @@ MANDATORY: This is the second-pass (Tier 2) audit of the revised draft. You MUST
     def escalation_node(state: ChartPipelineState) -> Dict[str, Any]:
         task = _get_input(state)
         soul_prompt = load_soul("frontier_escalation", fallback_prompt="You are the Frontier Model Escalation Specialist.")
-
-        # MANDATORY Web Search: verify claims — web search is REQUIRED, not optional
-        search_context = _search_context(task, max_results=5)
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         prompt = f"""{soul_prompt}
 
-⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Your internal knowledge may be stale. You MUST rely on the web search context below to verify any claims about recent events, releases, data, or developments.
+Available Tools:
+{tools.prompt_block()}
 
 Task: "{task}"
 Previous Specialist Draft: {state.get("specialist_output", "N/A")}
 
-Web Search Context (MANDATORY — Max 2 Snippets):
+Extended Web Search Context (Live Results):
 {search_context}
 
-MANDATORY: Synthesize a refined solution. You MUST cross-reference key claims against the web search context. Do NOT rely on your own training data or internal knowledge — it may be outdated. Correct any outdated or inaccurate information, especially regarding events, releases, or data after 2024. If a claim is not corroborated by the search results, flag it as UNVERIFIED."""
+Synthesize a refined, authoritative solution correcting any inaccuracies."""
 
-        res = llm_client.generate_completion(
-            prompt, messages=[], max_tokens=2048, agent="frontier_escalation"
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="frontier_escalation", max_tokens=4096
         )
+
         msg = {
             "id": f"msg_esc_{int(time.time() * 1000)}",
             "sender": "Escalation Node (Frontier Model)",
             "role": "assistant",
-            "content": f"### Frontier Model Escalation Synthesis\n\n{res.content}",
+            "content": f"### Frontier Model Escalation Synthesis\n\n{content}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
-            "escalation_notes": res.content,
+            "escalation_notes": content,
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Frontier Model Escalation",
-                    "thought": res.thought or "Escalated task to high-capability frontier model reasoning.",
+                    "thought": raw_thought or "Escalated task to high-capability frontier model reasoning.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -507,43 +627,43 @@ MANDATORY: Synthesize a refined solution. You MUST cross-reference key claims ag
     def adjudicate_repair_node(state: ChartPipelineState) -> Dict[str, Any]:
         esc = state.get("escalation_notes") or state.get("specialist_output", "")
         soul_prompt = load_soul("adjudicator_repair", fallback_prompt="You are the Adjudication & Repair Specialist.")
-
-        # MANDATORY Web Search: verify claims — web search is REQUIRED, not optional
         task = _get_input(state)
-        search_context = _search_context(task, max_results=5)
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         prompt = f"""{soul_prompt}
 
-⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Your internal knowledge may be stale. You MUST rely on the web search context below to verify any claims about recent events, releases, data, or developments.
+Available Tools:
+{tools.prompt_block()}
 
 Draft Solution to Repair:
 {esc}
 
-Web Search Context (MANDATORY — Max 2 Snippets):
+Extended Web Search Context (Live Results):
 {search_context}
 
-MANDATORY: Repair the draft solution. You MUST cross-reference key claims against the web search context. Do NOT rely on your own training data or internal knowledge — it may be outdated. Correct any outdated or inaccurate information, especially regarding events, releases, or data after 2024. If a claim is not corroborated by the search results, flag it as UNVERIFIED. Ensure all factual claims are corroborated by the search results."""
+Repair the draft solution, ensuring all factual claims are verified and clearly explained."""
 
-        res = llm_client.generate_completion(
-            prompt, messages=[], max_tokens=2048, agent="adjudicator_repair"
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="adjudicator_repair", max_tokens=4096
         )
+
         msg = {
             "id": f"msg_adj_{int(time.time() * 1000)}",
             "sender": "Adjudicate & Repair Node",
             "role": "assistant",
-            "content": f"### Adjudicated & Repaired Output\n\n{res.content}",
+            "content": f"### Adjudicated & Repaired Output\n\n{content}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
-            "repaired_output": res.content,
-            "specialist_output": res.content,
+            "repaired_output": content,
+            "specialist_output": content,
             "is_converged": True,
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Adjudication Node",
-                    "thought": res.thought or "Adjudicated escalation feedback and applied repairs.",
+                    "thought": raw_thought or "Adjudicated escalation feedback and applied repairs.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -557,34 +677,31 @@ MANDATORY: Repair the draft solution. You MUST cross-reference key claims agains
             "final_verifier",
             fallback_prompt="You are the Final Answer Verifier.",
         )
-
-        # MANDATORY Web Search: verify final answer claims — web search is REQUIRED, not optional
-        search_context = _search_context(task, max_results=5)
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         prompt = f"""{soul_prompt}
 
-⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Your internal knowledge may be stale. You MUST rely on the web search context below to verify any claims about recent events, releases, data, or developments.
+Available Tools:
+{tools.prompt_block()}
 
 Task: "{task}"
 
 Candidate Final Answer:
 {solution}
 
-Web Search Context (MANDATORY — Max 2 Snippets):
+Extended Web Search Context (Live Results):
 {search_context}
 
-MANDATORY: Review the candidate answer for correctness, completeness, clarity, and whether it directly addresses the task. You MUST cross-reference key factual claims against the web search context. Do NOT rely on your own training data or internal knowledge — it may be outdated. Pay special attention to any claims about events, releases, or data after 2024. If a claim is not corroborated by the search results, mark it as UNVERIFIED. Respond with a short rationale and end with either VERIFIED (only if claims are corroborated) or REJECTED."""
+Review the candidate answer for correctness, completeness, and clarity. Respond with a short rationale and end with either VERIFIED or REJECTED."""
 
-        # Final verification uses a dedicated high-capability model
-        # (Muse Glimmer 30B 6-bit) for an independent second opinion.
-        res = llm_client.generate_completion(
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state,
             prompt,
-            messages=[],
-            max_tokens=1024,
-            agent="final_verifier",
+            agent_name="final_verifier",
             model_name="Muse-Glimmer-30B-6bit",
+            max_tokens=4096,
         )
-        verification_text = res.content.strip()
+        verification_text = content.strip()
         is_verified = "VERIFIED" in verification_text.upper()
 
         msg = {
@@ -599,10 +716,10 @@ MANDATORY: Review the candidate answer for correctness, completeness, clarity, a
             "final_verification_result": verification_text,
             "final_answer_verified": is_verified,
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Final Verifier",
-                    "thought": res.thought or f"Checked the final answer for completeness and direct task alignment. Verified = {is_verified}.",
+                    "thought": raw_thought or f"Checked the final answer for completeness and direct task alignment. Verified = {is_verified}.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -613,9 +730,7 @@ MANDATORY: Review the candidate answer for correctness, completeness, clarity, a
         solution = state.get("repaired_output") or state.get("specialist_output", "")
         task = _get_input(state)
         verifier_feedback = state.get("final_verification_result", "No verifier feedback available.")
-
-        # MANDATORY Web Search: verify claims while repairing
-        search_context = _search_context(task, max_results=5)
+        search_context = _search_context(task, max_results=5, max_chars=16000)
 
         soul_prompt = load_soul(
             "adjudicator_repair",
@@ -623,48 +738,48 @@ MANDATORY: Review the candidate answer for correctness, completeness, clarity, a
         )
         prompt = f"""{soul_prompt}
 
-⚠️ CRITICAL DATE CONTEXT: We are in 2026. Do NOT assume we are in 2024 or 2025. Your internal knowledge may be stale. You MUST rely on the web search context below to verify any claims about recent events, releases, data, or developments.
+Available Tools:
+{tools.prompt_block()}
 
 Task: "{task}"
 
-Candidate Final Answer (rejected by the verifier):
+Candidate Final Answer (rejected by verifier):
 {solution}
 
-Verifier Feedback (address every point raised):
+Verifier Feedback:
 {verifier_feedback}
 
-Web Search Context (MANDATORY — Max 2 Snippets):
+Extended Web Search Context (Live Results):
 {search_context}
 
-MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims against the web search context. Do NOT rely on your own training data or internal knowledge — it may be outdated. Correct every factual inaccuracy, fill gaps, and resolve each issue the verifier flagged. Output ONLY the repaired final answer, with no commentary."""
+Repair the rejected final answer, correcting every inaccuracy and filling gaps. Output a clean, complete final answer."""
 
-        # Final repair uses the same dedicated high-capability model
-        # (Muse Glimmer 30B 6-bit) as the final verification step.
-        res = llm_client.generate_completion(
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state,
             prompt,
-            messages=[],
-            max_tokens=2048,
-            agent="final_repair",
+            agent_name="final_repair",
             model_name="Muse-Glimmer-30B-6bit",
+            max_tokens=4096,
         )
+
         msg = {
             "id": f"msg_final_repair_{int(time.time() * 1000)}",
             "sender": "Final Repair Node (Muse Glimmer)",
             "role": "assistant",
-            "content": f"### Final Answer Repair (Muse Glimmer)\n\n{res.content}",
+            "content": f"### Final Answer Repair (Muse Glimmer)\n\n{content}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
-            "repaired_output": res.content,
-            "specialist_output": res.content,
+            "repaired_output": content,
+            "specialist_output": content,
             "final_repair_applied": True,
             "final_answer_verified": True,
             "messages": [msg],
-            "agent_thoughts": [
+            "agent_thoughts": thoughts or [
                 {
                     "agent": "Final Repair (Muse Glimmer)",
-                    "thought": res.thought or "Repaired the rejected final answer using Muse Glimmer 30B 6-bit.",
+                    "thought": raw_thought or "Repaired the rejected final answer using Muse Glimmer 30B 6-bit.",
                     "timestamp": time.strftime("%H:%M:%S"),
                 }
             ],
@@ -705,7 +820,6 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
             "tool": tool_name,
             "tool_args": tool_args,
         }
-
 
         msg = {
             "id": f"msg_prep_{int(time.time() * 1000)}",
@@ -768,6 +882,7 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
         }
         return {
             "memory_logs": [log_entry],
+            "final_response": "Action blocked during preparation.",
             "messages": [msg],
         }
 
@@ -807,7 +922,6 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
                 **tool_args,
             )
             if tool_result.get("ok"):
-
                 result_text = (
                     f"Executed action [{payload.get('target_action', 'run')}] successfully. "
                     f"Tool '{tool_name}' result: {tool_result.get('message', '')}"
@@ -841,10 +955,25 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
 
     # 10. FINALIZE & MEMORY NODE
     def finalize_memory_node(state: ChartPipelineState) -> Dict[str, Any]:
+        raw_solution = state.get("repaired_output") or state.get("specialist_output", "")
+
+        # Clean raw solution if it has redundant internal headers
+        clean_solution = raw_solution.strip()
+        for prefix in [
+            "### Specialist Solution Draft (Local AI)",
+            "### Final Answer Repair (Muse Glimmer)",
+            "### Adjudicated & Repaired Output",
+            "### Revised Draft (post Tier 1 feedback)",
+        ]:
+            if clean_solution.startswith(prefix):
+                clean_solution = clean_solution[len(prefix):].strip()
+
+        clean_solution = clean_solution or "Pipeline execution completed successfully."
+
         memory_entry = {
             "event": "PIPELINE_SUCCESS",
             "input": state.get("user_input"),
-            "result": state.get("execution_result"),
+            "result": state.get("execution_result") or clean_solution,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
 
@@ -854,7 +983,7 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
             "input": memory_entry["input"],
             "result": memory_entry["result"],
             "timestamp": memory_entry["timestamp"],
-            "final_answer": state.get("specialist_output"),
+            "final_answer": clean_solution,
         })
 
         # Close the run record: status, final answer, duration, memory count.
@@ -866,35 +995,22 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
                 finish_run(
                     run_id,
                     status="completed",
-                    final_answer=state.get("specialist_output"),
+                    final_answer=clean_solution,
                     started_at=state.get("run_started_at"),
                 )
         except Exception:
             pass
 
-        verification_status = (
-            "VERIFIED"
-            if state.get("final_answer_verified", True)
-            else "REJECTED"
-        )
-        final_text = (
-            f"### Final Pipeline Result\n\n"
-            f"**Task**: {state.get('user_input')}\n\n"
-            f"**Solution**: {state.get('specialist_output', 'N/A')}\n\n"
-            f"**Verification**: {verification_status}\n\n"
-            f"**Run ID**: {state.get('run_id', 'N/A')}\n\n"
-            f"**Execution Status**: Completed & Persisted to Memory."
-        )
-
         msg = {
             "id": f"msg_fin_{int(time.time() * 1000)}",
-            "sender": "Finalize & Memory Node",
+            "sender": "Chart Pipeline",
             "role": "assistant",
-            "content": final_text,
+            "content": clean_solution,
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
+            "final_response": clean_solution,
             "memory_logs": [memory_entry],
             "messages": [msg],
             "agent_thoughts": [
@@ -913,15 +1029,11 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
         return "specialist"
 
     def route_tier2(state: ChartPipelineState) -> str:
-        # After the second-pass audit, a verified revised draft goes straight to
-        # the final answer; an unverified one is escalated to the frontier model.
         if state.get("tier2_verified"):
             return "final_verification"
         return "escalation"
 
     def route_final_verification(state: ChartPipelineState) -> str:
-        # A verified final answer proceeds to action prep; a rejected one is
-        # repaired by the Muse Glimmer final-repair node before action prep.
         if state.get("final_answer_verified"):
             return "prepare_action"
         return "final_repair"
@@ -960,9 +1072,6 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
     workflow.add_edge("specialist", "tier0_checks")
     workflow.add_edge("tier0_checks", "tier05_web_verify")
     workflow.add_edge("tier05_web_verify", "tier1_verify")
-    # Every draft goes through revisions + a second-pass (Tier 2) audit before
-    # the final answer. The frontier escalation is now a deeper fallback that
-    # only triggers when the revised draft still fails Tier 2 verification.
     workflow.add_edge("tier1_verify", "revisions")
     workflow.add_edge("revisions", "tier2_verify")
     workflow.add_conditional_edges(
@@ -973,8 +1082,6 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
 
     workflow.add_edge("escalation", "adjudicate_repair")
     workflow.add_edge("adjudicate_repair", "final_verification")
-    # A verified final answer goes straight to action prep; a rejected one is
-    # repaired by the Muse Glimmer final-repair node before action prep.
     workflow.add_conditional_edges(
         "final_verification",
         route_final_verification,
@@ -993,7 +1100,8 @@ MANDATORY: Repair the rejected final answer. You MUST cross-reference key claims
     workflow.add_edge("execute", "finalize_memory")
     workflow.add_edge("finalize_memory", END)
 
-    return workflow.compile()
+    active_checkpointer = checkpointer
+    return workflow.compile(checkpointer=active_checkpointer)
 
 
 # Default compiled graph instance for LangGraph Studio CLI

@@ -22,7 +22,9 @@ class MasterPipelineState(TypedDict, total=False):
     agent_thoughts: Annotated[List[Dict[str, Any]], operator.add]
 
 
-def create_master_pipeline_graph(llm_client: LocalLLMClient):
+def create_master_pipeline_graph(
+    llm_client: LocalLLMClient, checkpointer: Optional[Any] = None
+):
     triage_subgraph = create_claims_triage_graph(llm_client)
     supervisor_subgraph = create_multi_agent_supervisor_graph(llm_client)
     review_subgraph = create_solution_review_team_graph(llm_client)
@@ -198,7 +200,8 @@ def create_master_pipeline_graph(llm_client: LocalLLMClient):
     workflow.add_edge("supervisor_stage", "reviewer_stage")
     workflow.add_edge("reviewer_stage", END)
 
-    return workflow.compile()
+    active_checkpointer = checkpointer
+    return workflow.compile(checkpointer=active_checkpointer)
 
 
 # Default compiled graph instance for LangGraph Studio CLI

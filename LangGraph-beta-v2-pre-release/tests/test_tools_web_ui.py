@@ -120,7 +120,7 @@ def test_direct_chat_tool_execution():
         "agent_thoughts": [],
     }
 
-    result = graph.invoke(state_input)
+    result = graph.invoke(state_input, config={"configurable": {"thread_id": run_id}})
     assert result.get("final_response")
     thoughts = result.get("agent_thoughts", [])
     assert len(thoughts) >= 1
@@ -156,6 +156,23 @@ def test_api_models_select_endpoint():
     status_res = client.get("/api/status")
     assert status_res.status_code == 200
     assert status_res.json().get("model_name") == target_model
+
+
+def test_ollama_fallback_and_model_resolution():
+    """Verify LocalLLMClient Ollama model name normalization and fallback execution."""
+    from src.core.local_llm import LocalLLMClient, LocalLLMConfig
+
+    # 1. Normalization
+    client = LocalLLMClient(config=LocalLLMConfig(ollama_model_name="qwen3.5:9b"))
+    assert client._normalize_ollama_model("qwen3.5-9b") == "qwen3.5:9b"
+    assert client._normalize_ollama_model("qwen3.5") == "qwen3.5:9b"
+    assert client._normalize_ollama_model("qwen2.5-coder-7b") == "qwen2.5-coder:7b"
+
+    # 2. Selection of qwen3.5-9b via API
+    test_app_client = TestClient(app)
+    sel_res = test_app_client.post("/api/models/select", json={"model_name": "qwen3.5-9b"})
+    assert sel_res.status_code == 200
+    assert sel_res.json().get("model_name") == "qwen3.5:9b"
 
 
 def test_api_upload_endpoint():
@@ -208,6 +225,30 @@ def test_api_chat_stop_endpoint():
     data = response.json()
     assert data.get("ok") is True
     assert "stopped" in data.get("message", "").lower()
+
+
+def test_api_upload_excel_endpoint():
+    import base64
+    excel_path = Path(__file__).resolve().parent.parent / "mock_enterprise_financial_q1_2026.xlsx"
+    if excel_path.exists():
+        raw_bytes = excel_path.read_bytes()
+        b64_str = "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + base64.b64encode(raw_bytes).decode("ascii")
+        client = TestClient(app)
+        res = client.post(
+            "/api/upload",
+            json={
+                "filename": "mock_enterprise_financial_q1_2026.xlsx",
+                "content": b64_str,
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data.get("ok") is True
+        text = data.get("text", "")
+        assert "Revenue & ARR" in text or "Enterprise AI" in text
+        assert "Executive KPIs" in text
+
 
 
 

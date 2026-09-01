@@ -1431,7 +1431,8 @@ html, body {
   padding: 16px;
 }
 
-.modal-wrapper.active {
+.modal-wrapper.active,
+.modal-wrapper.open {
   display: flex;
 }
 
@@ -1454,6 +1455,12 @@ html, body {
   max-height: 85vh;
   overflow: hidden;
   z-index: 121;
+}
+
+.modal-card.modal-card-wide {
+  max-width: 960px;
+  width: 92vw;
+  height: 86vh;
 }
 
 .modal-header {
@@ -1749,6 +1756,217 @@ html, body {
   gap: 12px;
 }
 
+/* Empty State Tools Showcase Section */
+.empty-tools-section {
+  width: 100%;
+  max-width: 780px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  margin-bottom: 4px;
+}
+
+.empty-tools-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.empty-tools-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.empty-tools-title svg {
+  color: #60a5fa;
+}
+
+.empty-tools-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  background-color: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  padding: 1px 7px;
+  border-radius: 12px;
+}
+
+.empty-tools-explore-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.empty-tools-explore-btn:hover {
+  color: #60a5fa;
+  border-color: rgba(96, 165, 250, 0.4);
+  background-color: rgba(96, 165, 250, 0.08);
+}
+
+.empty-tools-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.empty-tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: var(--bg-main);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  user-select: none;
+}
+
+.empty-tool-chip:hover {
+  border-color: #60a5fa;
+  background-color: rgba(96, 165, 250, 0.1);
+  transform: translateY(-1px);
+}
+
+.empty-tool-chip .chip-name {
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.empty-tool-chip.cat-search:hover { border-color: #38bdf8; color: #38bdf8; }
+.empty-tool-chip.cat-code:hover { border-color: #4ade80; color: #4ade80; }
+.empty-tool-chip.cat-docs:hover { border-color: #fbbf24; color: #fbbf24; }
+.empty-tool-chip.cat-files:hover { border-color: #c084fc; color: #c084fc; }
+.empty-tool-chip.cat-git:hover { border-color: #f87171; color: #f87171; }
+
+.empty-tool-chip.cat-search .chip-icon { color: #38bdf8; }
+.empty-tool-chip.cat-code .chip-icon { color: #4ade80; }
+.empty-tool-chip.cat-docs .chip-icon { color: #fbbf24; }
+.empty-tool-chip.cat-files .chip-icon { color: #c084fc; }
+.empty-tool-chip.cat-git .chip-icon { color: #f87171; }
+
+/* Inline Tools Button in Chat Form */
+.inline-tools-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  margin-right: 2px;
+}
+
+.inline-tools-btn:hover {
+  color: #60a5fa;
+  border-color: rgba(96, 165, 250, 0.4);
+  background-color: rgba(96, 165, 250, 0.08);
+}
+
+.inline-tools-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  background-color: rgba(96, 165, 250, 0.2);
+  color: #60a5fa;
+  padding: 1px 5px;
+  border-radius: 10px;
+}
+
+/* Tools Search Bar & Category Filters */
+.tools-search-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.tools-search-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+}
+
+.tools-search-input-wrapper svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.tools-search-input {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 8px 0;
+  outline: none;
+}
+
+.tools-category-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tool-cat-btn {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 14px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tool-cat-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.tool-cat-btn.active {
+  background-color: rgba(96, 165, 250, 0.15);
+  border-color: rgba(96, 165, 250, 0.4);
+  color: #60a5fa;
+  font-weight: 600;
+}
+
 /* Tools Catalog Grid */
 .tools-grid {
   display: grid;
@@ -1766,7 +1984,7 @@ html, body {
   padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   transition: border-color var(--transition-fast), transform var(--transition-fast);
 }
 
@@ -1779,6 +1997,17 @@ html, body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+}
+
+.tool-card-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-icon-span {
+  font-size: 14px;
 }
 
 .tool-name-badge {
@@ -1787,27 +2016,26 @@ html, body {
   font-weight: 600;
   color: #60a5fa;
   background-color: rgba(96, 165, 250, 0.1);
-  padding: 3px 8px;
+  padding: 2px 7px;
   border-radius: 4px;
   border: 1px solid rgba(96, 165, 250, 0.2);
 }
 
-.tool-test-btn {
-  background-color: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-muted);
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all var(--transition-fast);
+.tool-category-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 2px 6px;
+  border-radius: 3px;
 }
 
-.tool-test-btn:hover {
-  color: var(--text-primary);
-  border-color: var(--border-light);
-  background-color: var(--bg-card);
-}
+.tool-category-badge.cat-search { background-color: rgba(56, 189, 248, 0.12); color: #38bdf8; }
+.tool-category-badge.cat-code { background-color: rgba(74, 222, 128, 0.12); color: #4ade80; }
+.tool-category-badge.cat-docs { background-color: rgba(251, 191, 36, 0.12); color: #fbbf24; }
+.tool-category-badge.cat-files { background-color: rgba(192, 132, 252, 0.12); color: #c084fc; }
+.tool-category-badge.cat-git { background-color: rgba(248, 113, 113, 0.12); color: #f87171; }
+.tool-category-badge.cat-other { background-color: rgba(148, 163, 184, 0.12); color: #94a3b8; }
 
 .tool-desc {
   font-size: 12.5px;
@@ -1819,7 +2047,6 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 4px;
 }
 
 .tool-param-pill {
@@ -1830,6 +2057,49 @@ html, body {
   padding: 2px 6px;
   border-radius: 3px;
   border: 1px solid var(--border-subtle);
+}
+
+.tool-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.tool-test-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tool-test-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-light);
+  background-color: var(--bg-card);
+}
+
+.tool-prompt-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: #60a5fa;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tool-prompt-btn:hover {
+  background-color: rgba(96, 165, 250, 0.1);
+  border-color: rgba(96, 165, 250, 0.3);
 }
 
 /* Interactive Tool Tester Form */

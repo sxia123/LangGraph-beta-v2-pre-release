@@ -1,6 +1,6 @@
 import operator
 import time
-from typing import Annotated, Any, Dict, List
+from typing import Annotated, Any, Dict, List, Optional
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
@@ -32,7 +32,9 @@ def _get_task(state: CodeReviewState) -> str:
     return task
 
 
-def create_code_review_team_graph(llm_client: LocalLLMClient):
+def create_code_review_team_graph(
+    llm_client: LocalLLMClient, checkpointer: Optional[Any] = None
+):
     workflow = StateGraph(CodeReviewState)
 
     def developer_node(state: CodeReviewState) -> Dict[str, Any]:
@@ -121,7 +123,8 @@ def create_code_review_team_graph(llm_client: LocalLLMClient):
     workflow.add_edge("developer", "reviewer")
     workflow.add_conditional_edges("reviewer", route_review, {"developer": "developer", END: END})
 
-    return workflow.compile()
+    active_checkpointer = checkpointer
+    return workflow.compile(checkpointer=active_checkpointer)
 
 
 # Default compiled graph instance for LangGraph Studio CLI

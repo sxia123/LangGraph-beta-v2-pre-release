@@ -61,7 +61,9 @@ class DirectChatState(TypedDict, total=False):
     run_id: Optional[str]
 
 
-def create_direct_chat_graph(client: LocalLLMClient):
+def create_direct_chat_graph(
+    client: LocalLLMClient, checkpointer: Optional[Any] = None
+):
     workflow = StateGraph(DirectChatState)
     tools = get_tool_loader(client)
 
@@ -210,7 +212,11 @@ def create_direct_chat_graph(client: LocalLLMClient):
     workflow.add_node("qwen_assistant", direct_chat_node)
     workflow.add_edge(START, "qwen_assistant")
     workflow.add_edge("qwen_assistant", END)
-    return workflow.compile()
+
+    from src.core.checkpointer import get_default_checkpointer
+
+    active_checkpointer = checkpointer if checkpointer is not None else get_default_checkpointer()
+    return workflow.compile(checkpointer=active_checkpointer)
 
 
 WORKFLOW_FACTORIES = {
@@ -283,27 +289,73 @@ def stop_chat_stream(payload: Optional[ChatStopRequest] = None):
     }
 
 
-@app.post("/api/upload")
-def upload_file_endpoint(payload: FileUploadPayload):
-    """Ingests a file (text, code, or document) and extracts its textual content."""
-    filename = payload.filename or "uploaded_file.txt"
-    raw_content = payload.content or ""
+def extract_file_text(filename: str, raw_content: str) -> str:
+    """Extracts readable text/markdown from uploaded raw file content or data URI."""
+    if not raw_content:
+        return ""
 
-    text = ""
+    decoded_bytes: Optional[bytes] = None
     if raw_content.startswith("data:"):
         try:
             import base64
 
             _header, encoded = raw_content.split(",", 1)
             decoded_bytes = base64.b64decode(encoded)
-            try:
-                text = decoded_bytes.decode("utf-8")
-            except Exception:
-                text = decoded_bytes.decode("latin-1", errors="replace")
         except Exception:
-            text = raw_content
-    else:
-        text = raw_content
+            pass
+
+    fn_lower = filename.lower()
+    if fn_lower.endswith((".xlsx", ".xls", ".xlsm")):
+        try:
+            import io
+
+            import openpyxl
+
+            wb = None
+            if decoded_bytes is not None:
+                wb = openpyxl.load_workbook(io.BytesIO(decoded_bytes), data_only=True)
+            elif os.path.isfile(raw_content):
+                wb = openpyxl.load_workbook(raw_content, data_only=True)
+
+            if wb:
+                md_sheets = []
+                for sheet_name in wb.sheetnames:
+                    ws = wb[sheet_name]
+                    rows = list(ws.iter_rows(values_only=True))
+                    if not rows:
+                        continue
+                    header = [str(c if c is not None else "") for c in rows[0]]
+                    md_table = [
+                        f"### Sheet: {sheet_name}",
+                        "",
+                        "| " + " | ".join(header) + " |",
+                        "| " + " | ".join(["---"] * len(header)) + " |",
+                    ]
+                    for row in rows[1:]:
+                        if any(c is not None for c in row):
+                            cells = [str(c if c is not None else "") for c in row]
+                            md_table.append("| " + " | ".join(cells) + " |")
+                    md_sheets.append("\n".join(md_table))
+                if md_sheets:
+                    return "\n\n".join(md_sheets)
+        except Exception:
+            pass
+
+    if decoded_bytes is not None:
+        try:
+            return decoded_bytes.decode("utf-8")
+        except Exception:
+            return decoded_bytes.decode("latin-1", errors="replace")
+
+    return raw_content
+
+
+@app.post("/api/upload")
+def upload_file_endpoint(payload: FileUploadPayload):
+    """Ingests a file (text, code, or document) and extracts its textual content."""
+    filename = payload.filename or "uploaded_file.txt"
+    raw_content = payload.content or ""
+    text = extract_file_text(filename, raw_content)
 
     return {
         "ok": True,
@@ -358,7 +410,10 @@ def select_model_endpoint(req: ModelSelectRequest):
     """Sets the active default model on the server."""
     model = req.model_name.strip()
     if model:
-        llm_client.config.model_name = model
+        if model.lower().startswith("qwen3.5") and hasattr(llm_client, "_normalize_ollama_model"):
+            llm_client.config.model_name = llm_client._normalize_ollama_model(model)
+        else:
+            llm_client.config.model_name = model
     return {"ok": True, "model_name": llm_client.config.model_name}
 
 
@@ -404,6 +459,38 @@ def get_checkpoints_endpoint(
         "count": len(checkpoints[:limit]),
         "checkpoints": checkpoints[:limit],
     }
+
+
+class RollbackRequest(BaseModel):
+    checkpoint_id: str
+
+
+@app.get("/api/checkpoints/files")
+def get_file_checkpoints_endpoint(
+    file_path: Optional[str] = None,
+    run_id: Optional[str] = None,
+    limit: int = 50,
+):
+    """Retrieve pre- and post-file-change checkpoints."""
+    from src.core.checkpointer import get_file_checkpoints
+
+    checkpoints = get_file_checkpoints(file_path=file_path, run_id=run_id, limit=limit)
+    return {
+        "ok": True,
+        "count": len(checkpoints),
+        "checkpoints": checkpoints,
+    }
+
+
+@app.post("/api/checkpoints/rollback")
+def rollback_file_checkpoint_endpoint(req: RollbackRequest):
+    """Rolls back a file to the state recorded in a pre-file-change checkpoint."""
+    from src.core.checkpointer import rollback_file_checkpoint
+
+    res = rollback_file_checkpoint(req.checkpoint_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("message", "Rollback failed"))
+    return res
 
 
 @app.get("/api/workflows")
@@ -548,7 +635,8 @@ def handle_chat_stream(req: ChatRequest):
             for f in req.files:
                 fn = f.get("filename", "attached_file.txt")
                 txt = f.get("content") or f.get("text") or ""
-                file_blocks.append(f"--- File Attachment: {fn} ---\n{txt}\n--- End File ---")
+                extracted = extract_file_text(fn, txt)
+                file_blocks.append(f"--- File Attachment: {fn} ---\n{extracted}\n--- End File ---")
             if file_blocks:
                 attachments_str = "\n\n" + "\n\n".join(file_blocks)
                 effective_prompt = f"{effective_prompt}{attachments_str}" if effective_prompt else "\n\n".join(file_blocks)
@@ -659,7 +747,8 @@ def handle_chat_stream(req: ChatRequest):
 
             def _worker():
                 try:
-                    for chunk in graph.stream(initial_input):
+                    config = {"configurable": {"thread_id": run_id}}
+                    for chunk in graph.stream(initial_input, config=config):
                         chunk_q.put(("chunk", chunk))
                 except Exception as err:  # noqa: BLE001
                     chunk_q.put(("error", str(err)))

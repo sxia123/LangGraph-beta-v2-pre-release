@@ -349,6 +349,134 @@ def delete_run(run_id: str) -> bool:
             return cur.rowcount > 0
 
 
+def get_memory_by_id(memory_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a single memory or checkpoint item by id."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "SELECT id, run_id, event, input, result, metadata, timestamp FROM memories WHERE id = ?",
+        (memory_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    try:
+        inp = json.loads(row[3]) if row[3] else None
+    except Exception:
+        inp = row[3]
+    try:
+        res = json.loads(row[4]) if row[4] else None
+    except Exception:
+        res = row[4]
+    try:
+        meta = json.loads(row[5]) if row[5] else None
+    except Exception:
+        meta = row[5]
+    return {
+        "id": row[0],
+        "run_id": row[1],
+        "event": row[2],
+        "input": inp,
+        "result": res,
+        "metadata": meta,
+        "timestamp": row[6],
+    }
+
+
+def save_file_checkpoint(
+    file_path: str,
+    content: Optional[str] = None,
+    exists: bool = False,
+    run_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Saves a file modification checkpoint to SQLite memory."""
+    abs_path = os.path.abspath(file_path)
+    norm_path = abs_path.replace("\\", "/")
+    meta = dict(metadata or {})
+    checkpoint_type = meta.get("checkpoint_type", "pre_file_change")
+    event_name = f"{checkpoint_type}:{os.path.basename(file_path)}"
+
+    entry = {
+        "run_id": run_id,
+        "event": event_name,
+        "input": {
+            "file_path": abs_path,
+            "normalized_path": norm_path,
+            "exists": exists,
+            "content": content,
+        },
+        "result": {
+            "status": "recorded",
+            "file_path": abs_path,
+            "normalized_path": norm_path,
+        },
+        "metadata": meta,
+    }
+    return save_memory(entry)
+
+
+def get_file_checkpoints(
+    file_path: Optional[str] = None, run_id: Optional[str] = None, limit: int = 50
+) -> list:
+    """Retrieve file checkpoints from SQLite memory, optionally filtered by file_path or run_id."""
+    conn = _get_conn()
+    clauses = ["event LIKE '%file_change%'"]
+    params: list = []
+
+    if run_id:
+        clauses.append("run_id = ?")
+        params.append(run_id)
+
+    if file_path:
+        abs_p = os.path.abspath(file_path)
+        norm_p = abs_p.replace("\\", "/")
+        esc_p = abs_p.replace("\\", "\\\\")
+        base_p = os.path.basename(abs_p)
+        clauses.append(
+            "("
+            "INSTR(COALESCE(input, ''), ?) > 0 OR INSTR(COALESCE(metadata, ''), ?) > 0 OR "
+            "INSTR(COALESCE(input, ''), ?) > 0 OR INSTR(COALESCE(metadata, ''), ?) > 0 OR "
+            "INSTR(COALESCE(input, ''), ?) > 0 OR INSTR(COALESCE(metadata, ''), ?) > 0 OR "
+            "INSTR(COALESCE(event, ''), ?) > 0"
+            ")"
+        )
+        params.extend([abs_p, abs_p, norm_p, norm_p, esc_p, esc_p, base_p])
+
+    where_sql = " AND ".join(clauses)
+    params.append(limit)
+    cur = conn.execute(
+        f"SELECT id, run_id, event, input, result, metadata, timestamp FROM memories WHERE {where_sql} ORDER BY timestamp DESC LIMIT ?",
+        tuple(params),
+    )
+    rows = cur.fetchall()
+    out = []
+    for r in rows:
+        try:
+            inp = json.loads(r[3]) if r[3] else None
+        except Exception:
+            inp = r[3]
+        try:
+            res = json.loads(r[4]) if r[4] else None
+        except Exception:
+            res = r[4]
+        try:
+            meta = json.loads(r[5]) if r[5] else None
+        except Exception:
+            meta = r[5]
+        out.append(
+            {
+                "id": r[0],
+                "run_id": r[1],
+                "event": r[2],
+                "input": inp,
+                "result": res,
+                "metadata": meta,
+                "timestamp": r[6],
+            }
+        )
+    return out
+
+
 def get_memory_summary() -> Dict[str, Any]:
     """Retrieve memory statistics for persistent storage overview."""
     conn = _get_conn()
@@ -368,4 +496,6 @@ def get_memory_summary() -> Dict[str, Any]:
         "last_saved": last_saved,
         "db_path": os.path.abspath(DB_PATH),
     }
+
+
 

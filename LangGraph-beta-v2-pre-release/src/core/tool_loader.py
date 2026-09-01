@@ -8,6 +8,7 @@ Agents (graph nodes) get a `ToolLoader` instance and can:
 """
 
 import inspect
+import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -130,7 +131,21 @@ class ToolLoader:
             description="Query ChromaDB vector memory for semantically relevant memory chunks.",
         )
 
-        # 10. GitHub tools
+        # 10. File write (with automatic pre-file-change checkpointing)
+        self.register(
+            "file_write",
+            self._tool_file_write,
+            description="Write or overwrite a file at file_path with content (automatically creates pre-change checkpoint).",
+        )
+
+        # 11. File edit (with automatic pre-file-change checkpointing)
+        self.register(
+            "file_edit",
+            self._tool_file_edit,
+            description="Edit a file by finding and replacing a target substring (automatically creates pre-change checkpoint).",
+        )
+
+        # 12. GitHub tools
         try:
             from src.core import github_tool
 
@@ -191,24 +206,141 @@ class ToolLoader:
         except Exception as err:
             return {"ok": False, "message": f"ArXiv search error: {err}", "returncode": None}
 
-    def _tool_python_repl(self, code: str) -> Dict[str, Any]:
+    def _tool_python_repl(self, code: str, run_id: Optional[str] = None) -> Dict[str, Any]:
         try:
+            # Auto-detect file write operations in code to checkpoint before execution
+            import re
+
+            from src.core.checkpointer import checkpoint_before_file_change
+
+            file_matches = re.findall(r"""(?:open|Path)\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"][wa\+]""", code)
+            file_matches += re.findall(r"""Path\s*\(\s*['"]([^'"]+)['"]\s*\)\.write_""", code)
+            for f_match in set(file_matches):
+                try:
+                    checkpoint_before_file_change(
+                        f_match,
+                        run_id=run_id,
+                        metadata={"tool": "python_repl", "inferred_from_code": True},
+                    )
+                except Exception:
+                    pass
+
             try:
                 from langchain_experimental.utilities import PythonREPL
+
                 repl = PythonREPL()
                 res = repl.run(code)
-                return {"ok": True, "message": res if res else "Code executed successfully with no stdout output.", "returncode": 0}
+                return {
+                    "ok": True,
+                    "message": res if res else "Code executed successfully with no stdout output.",
+                    "returncode": 0,
+                }
             except (ImportError, ModuleNotFoundError):
                 import contextlib
                 import io
+
                 stdout_buf = io.StringIO()
                 exec_globals: Dict[str, Any] = {"__name__": "__main__"}
                 with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stdout_buf):
                     exec(code, exec_globals)
                 out = stdout_buf.getvalue().strip()
-                return {"ok": True, "message": out if out else "Code executed successfully with no stdout output.", "returncode": 0}
+                return {
+                    "ok": True,
+                    "message": out if out else "Code executed successfully with no stdout output.",
+                    "returncode": 0,
+                }
         except Exception as err:
             return {"ok": False, "message": f"Python REPL execution error: {err}", "returncode": None}
+
+    def _tool_file_write(
+        self, file_path: str, content: str, run_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Writes content to file_path with mandatory pre- and post-file-change checkpoints."""
+        try:
+            from src.core.checkpointer import (
+                checkpoint_after_file_change,
+                checkpoint_before_file_change,
+            )
+
+            abs_path = os.path.abspath(file_path)
+            pre_cp = checkpoint_before_file_change(
+                abs_path,
+                run_id=run_id,
+                metadata={"tool": "file_write", "action": "write"},
+            )
+
+            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+            post_cp = checkpoint_after_file_change(
+                abs_path,
+                pre_checkpoint_id=pre_cp["checkpoint_id"],
+                run_id=run_id,
+                metadata={"tool": "file_write"},
+            )
+
+            return {
+                "ok": True,
+                "message": f"File '{file_path}' written successfully ({len(content)} chars).",
+                "checkpoint_id": pre_cp["checkpoint_id"],
+                "post_checkpoint_id": post_cp["checkpoint_id"],
+                "returncode": 0,
+            }
+        except Exception as err:
+            return {"ok": False, "message": f"File write error: {err}", "returncode": None}
+
+    def _tool_file_edit(
+        self, file_path: str, target: str, replacement: str, run_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Edits an existing file by replacing target with replacement with mandatory checkpointing."""
+        try:
+            from src.core.checkpointer import (
+                checkpoint_after_file_change,
+                checkpoint_before_file_change,
+            )
+
+            abs_path = os.path.abspath(file_path)
+            if not os.path.isfile(abs_path):
+                return {"ok": False, "message": f"File '{file_path}' does not exist.", "returncode": None}
+
+            pre_cp = checkpoint_before_file_change(
+                abs_path,
+                run_id=run_id,
+                metadata={"tool": "file_edit", "action": "edit"},
+            )
+
+            with open(abs_path, "r", encoding="utf-8") as f:
+                current_text = f.read()
+
+            if target not in current_text:
+                return {
+                    "ok": False,
+                    "message": f"Target string not found in '{file_path}'.",
+                    "checkpoint_id": pre_cp["checkpoint_id"],
+                    "returncode": None,
+                }
+
+            new_text = current_text.replace(target, replacement)
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(new_text)
+
+            post_cp = checkpoint_after_file_change(
+                abs_path,
+                pre_checkpoint_id=pre_cp["checkpoint_id"],
+                run_id=run_id,
+                metadata={"tool": "file_edit"},
+            )
+
+            return {
+                "ok": True,
+                "message": f"File '{file_path}' edited successfully.",
+                "checkpoint_id": pre_cp["checkpoint_id"],
+                "post_checkpoint_id": post_cp["checkpoint_id"],
+                "returncode": 0,
+            }
+        except Exception as err:
+            return {"ok": False, "message": f"File edit error: {err}", "returncode": None}
 
     def _tool_math_eval(self, expression: str) -> Dict[str, Any]:
         try:
@@ -267,12 +399,67 @@ class ToolLoader:
 
     def _tool_doc_convert(self, file_path: str) -> Dict[str, Any]:
         try:
+            # 1. Native Excel spreadsheet parsing (.xlsx, .xls, .xlsm)
+            if file_path.lower().endswith((".xlsx", ".xls", ".xlsm")):
+                try:
+                    import openpyxl
+
+                    wb = openpyxl.load_workbook(file_path, data_only=True)
+                    md_sheets = []
+                    for sheet_name in wb.sheetnames:
+                        ws = wb[sheet_name]
+                        rows = list(ws.iter_rows(values_only=True))
+                        if not rows:
+                            continue
+                        header = [str(c if c is not None else "") for c in rows[0]]
+                        md_table = [
+                            f"### Sheet: {sheet_name}",
+                            "",
+                            "| " + " | ".join(header) + " |",
+                            "| " + " | ".join(["---"] * len(header)) + " |",
+                        ]
+                        for row in rows[1:]:
+                            if any(c is not None for c in row):
+                                cells = [str(c if c is not None else "") for c in row]
+                                md_table.append("| " + " | ".join(cells) + " |")
+                        md_sheets.append("\n".join(md_table))
+                    if md_sheets:
+                        return {"ok": True, "message": "\n\n".join(md_sheets)[:16000], "returncode": 0}
+                except Exception:
+                    pass
+
+            # 2. CSV / TSV spreadsheet parsing
+            if file_path.lower().endswith((".csv", ".tsv")):
+                try:
+                    import csv
+
+                    delim = "\t" if file_path.lower().endswith(".tsv") else ","
+                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                        reader = list(csv.reader(f, delimiter=delim))
+                    if reader:
+                        header = [str(c) for c in reader[0]]
+                        md_table = [
+                            "| " + " | ".join(header) + " |",
+                            "| " + " | ".join(["---"] * len(header)) + " |",
+                        ]
+                        for row in reader[1:]:
+                            md_table.append("| " + " | ".join(str(c) for c in row) + " |")
+                        return {"ok": True, "message": "\n".join(md_table)[:16000], "returncode": 0}
+                except Exception:
+                    pass
+
+            # 3. MarkItDown converter
             from markitdown import MarkItDown
+
             md = MarkItDown()
             res = md.convert(file_path)
             return {"ok": True, "message": res.text_content[:8000], "returncode": 0}
         except Exception as err:
-            return {"ok": False, "message": f"MarkItDown conversion error: {err}", "returncode": None}
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    return {"ok": True, "message": f.read()[:8000], "returncode": 0}
+            except Exception:
+                return {"ok": False, "message": f"Document conversion error: {err}", "returncode": None}
 
     def _tool_docling_parse(self, file_path: str) -> Dict[str, Any]:
         try:
@@ -445,10 +632,24 @@ class ToolLoader:
 
         # 2. Tool Execution
         try:
+            call_kwargs = dict(kwargs)
+            try:
+                import inspect
+
+                sig = inspect.signature(tool.func)
+                if "run_id" in sig.parameters and "run_id" not in call_kwargs:
+                    call_kwargs["run_id"] = run_id
+            except Exception:
+                pass
+
             if tool.needs_llm:
-                result = tool.func(self.llm_client, **kwargs) if _first_param_is_client(tool.func) else tool.func(**kwargs)
+                result = (
+                    tool.func(self.llm_client, **call_kwargs)
+                    if _first_param_is_client(tool.func)
+                    else tool.func(**call_kwargs)
+                )
             else:
-                result = tool.func(**kwargs)
+                result = tool.func(**call_kwargs)
         except TypeError as err:
             duration_s = time.time() - start_time
             err_msg = f"Invalid arguments for '{name}': {err}"

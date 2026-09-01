@@ -66,6 +66,18 @@ class LocalLLMConfig(BaseModel):
     api_key: Optional[str] = Field(
         default_factory=lambda: os.getenv("OPENAI_API_KEY", "")
     )
+    ollama_base_url: str = Field(
+        default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    )
+    ollama_model_name: str = Field(
+        default_factory=lambda: os.getenv("OLLAMA_MODEL_NAME", "qwen3.5:9b")
+    )
+    enable_ollama_fallback: bool = Field(
+        default_factory=lambda: os.getenv("ENABLE_OLLAMA_FALLBACK", "true").lower() in ("1", "true", "yes")
+    )
+    ollama_timeout: int = Field(
+        default_factory=lambda: int(os.getenv("OLLAMA_TIMEOUT", "60"))
+    )
     agent_models: Dict[str, str] = Field(default_factory=parse_agent_model_map)
     temperature: float = 0.2
     max_tokens: int = Field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "4096")))
@@ -179,6 +191,22 @@ class LocalLLMClient:
                 return lookup
         return self.config.model_name
 
+    def _normalize_ollama_model(self, model_name: Optional[str]) -> str:
+        """Normalizes model aliases like 'qwen3.5-9b' or 'qwen3.5' to actual Ollama model tags."""
+        if not model_name:
+            return self.config.ollama_model_name or "qwen3.5:9b"
+        m_clean = model_name.strip()
+        m_lower = m_clean.lower()
+        if any(alias in m_lower for alias in ("qwen3.5", "qwen35", "qwen-3.5", "qwen_3.5")):
+            return "qwen3.5:9b"
+        if "2.5-coder" in m_lower or "coder" in m_lower:
+            return "qwen2.5-coder:7b"
+        if "2.5-7b" in m_lower or "2.5:7b" in m_lower:
+            return "qwen2.5:7b"
+        if ":" in m_clean:
+            return m_clean
+        return self.config.ollama_model_name or "qwen3.5:9b"
+
     def ping(self) -> Dict[str, Any]:
         if self.config.provider == "mock":
             return {
@@ -186,6 +214,7 @@ class LocalLLMClient:
                 "message": "Mock engine active (Offline visual simulation)",
                 "models": [
                     "Qwen3.8-27B-oQ6-mtp",
+                    "qwen3.5:9b",
                     "Qwen2.5-VL-72B-Instruct",
                     "Qwen2.5-VL-7B-Instruct",
                     "Qwen2.5-Coder-32B-Instruct",
@@ -194,79 +223,106 @@ class LocalLLMClient:
                 ],
             }
 
+        headers = self._get_headers()
+        base = self.config.base_url.rstrip("/")
+        detected_models: List[str] = []
+        primary_connected = False
+        ollama_connected = False
+        ollama_models: List[str] = []
+
+        # 1. Probe Ollama endpoint
+        ollama_base = (self.config.ollama_base_url or "http://127.0.0.1:11434").rstrip("/")
         try:
-            headers = self._get_headers()
-            base = self.config.base_url.rstrip("/")
+            res_ollama = requests.get(f"{ollama_base}/api/tags", headers=headers, timeout=3)
+            if res_ollama.status_code == 200:
+                ollama_connected = True
+                ollama_models = [
+                    m.get("name")
+                    for m in res_ollama.json().get("models", [])
+                    if isinstance(m, dict) and m.get("name")
+                ]
+        except Exception:
+            pass
 
-            if self.config.provider == "ollama":
-                res = requests.get(f"{base}/api/tags", headers=headers, timeout=5)
-                if res.status_code == 200:
-                    models = [m.get("name") for m in res.json().get("models", []) if isinstance(m, dict)]
-                    return {
-                        "ok": True,
-                        "message": f"Connected to Ollama ({len(models)} models detected)",
-                        "models": models,
-                    }
-
-            # Try OpenAI / oMLX / vLLM / LM Studio models endpoints
-            urls_to_try = [
-                self._get_openai_url("models"),
-                f"{base}/models",
-                f"{base}/v1/models",
-            ]
-            seen_urls: List[str] = []
-            for u in urls_to_try:
-                if u not in seen_urls:
-                    seen_urls.append(u)
-
-            for models_url in seen_urls:
-                try:
-                    res = requests.get(models_url, headers=headers, timeout=5)
-                    if res.status_code == 200:
-                        payload = res.json()
-                        models: List[str] = []
-                        if isinstance(payload, dict):
-                            raw_list = payload.get("data") or payload.get("models") or []
-                            if isinstance(raw_list, list):
-                                for item in raw_list:
-                                    if isinstance(item, dict):
-                                        m_id = item.get("id") or item.get("name") or item.get("model")
-                                        if m_id:
-                                            models.append(str(m_id))
-                                    elif isinstance(item, str):
-                                        models.append(item)
-                        elif isinstance(payload, list):
-                            for item in payload:
-                                if isinstance(item, dict):
-                                    m_id = item.get("id") or item.get("name")
-                                    if m_id:
-                                        models.append(str(m_id))
-                                elif isinstance(item, str):
-                                    models.append(item)
-
-                        if models:
-                            return {
-                                "ok": True,
-                                "message": f"Connected to {self.config.provider} ({len(models)} models available)",
-                                "models": models,
-                            }
-                except Exception:
-                    continue
-
-            # Fallback: if server responds to a health/ping or root
-            if self.config.model_name:
+        if self.config.provider == "ollama":
+            if ollama_connected:
                 return {
                     "ok": True,
-                    "message": f"Connected to {self.config.provider} (default model active)",
-                    "models": [self.config.model_name],
+                    "message": f"Connected to Ollama ({len(ollama_models)} models detected)",
+                    "models": ollama_models or [self.config.ollama_model_name],
+                    "provider": "ollama",
                 }
-
-            return {"ok": False, "message": f"Could not list models from {self.config.base_url}"}
-        except Exception as err:
             return {
                 "ok": False,
-                "message": f"Could not connect to {self.config.base_url}: {str(err)}",
+                "message": f"Could not connect to Ollama at {ollama_base}",
+                "models": [],
+                "provider": "ollama",
             }
+
+        # 2. Probe OpenAI / oMLX / vLLM / LM Studio models endpoints
+        urls_to_try = [
+            self._get_openai_url("models"),
+            f"{base}/models",
+            f"{base}/v1/models",
+        ]
+        seen_urls: List[str] = []
+        for u in urls_to_try:
+            if u not in seen_urls:
+                seen_urls.append(u)
+
+        for models_url in seen_urls:
+            try:
+                res = requests.get(models_url, headers=headers, timeout=3)
+                if res.status_code == 200:
+                    payload = res.json()
+                    raw_list = (
+                        payload.get("data") or payload.get("models") or []
+                        if isinstance(payload, dict)
+                        else payload
+                    )
+                    if isinstance(raw_list, list):
+                        for item in raw_list:
+                            if isinstance(item, dict):
+                                m_id = item.get("id") or item.get("name") or item.get("model")
+                                if m_id:
+                                    detected_models.append(str(m_id))
+                            elif isinstance(item, str):
+                                detected_models.append(item)
+                    if detected_models:
+                        primary_connected = True
+                        break
+            except Exception:
+                continue
+
+        all_models = list(dict.fromkeys(detected_models + ollama_models))
+
+        if primary_connected:
+            return {
+                "ok": True,
+                "message": f"Connected to {self.config.provider} ({len(detected_models)} models available, Ollama fallback {'ready' if ollama_connected else 'offline'})",
+                "models": all_models or [self.config.model_name],
+                "provider": self.config.provider,
+                "ollama_available": ollama_connected,
+            }
+
+        if ollama_connected:
+            return {
+                "ok": True,
+                "message": f"Primary {self.config.provider} offline; Ollama fallback active ({len(ollama_models)} models detected: {', '.join(ollama_models)})",
+                "models": ollama_models,
+                "provider": "ollama (fallback)",
+                "ollama_available": True,
+                "fallback_active": True,
+            }
+
+        if self.config.model_name:
+            return {
+                "ok": False,
+                "message": f"Could not connect to {self.config.base_url} or Ollama at {ollama_base}",
+                "models": [self.config.model_name],
+            }
+
+        return {"ok": False, "message": f"Could not list models from {self.config.base_url}"}
 
     def generate_completion(
         self,
@@ -299,16 +355,48 @@ class LocalLLMClient:
                 prepared_messages = [{"role": "user", "content": system_prompt, "images": images}]
 
             if self.config.provider == "ollama":
-                return self._call_ollama_api(
-                    system_prompt, prepared_messages, model_name=effective_model, max_tokens=max_tokens
+                target_ollama_model = self._normalize_ollama_model(
+                    effective_model or self.config.ollama_model_name
                 )
-            else:
-                return self._call_openai_compatible_api(
+                return self._call_ollama_api(
                     system_prompt,
                     prepared_messages,
-                    model_name=effective_model,
+                    model_name=target_ollama_model,
                     max_tokens=max_tokens,
                 )
+            else:
+                try:
+                    return self._call_openai_compatible_api(
+                        system_prompt,
+                        prepared_messages,
+                        model_name=effective_model,
+                        max_tokens=max_tokens,
+                    )
+                except Exception as primary_err:
+                    if self.config.enable_ollama_fallback:
+                        try:
+                            target_ollama_model = self._normalize_ollama_model(
+                                effective_model
+                                if ("qwen" in str(effective_model).lower() or ":" in str(effective_model))
+                                else self.config.ollama_model_name
+                            )
+                            ollama_res = self._call_ollama_api(
+                                system_prompt,
+                                prepared_messages,
+                                model_name=target_ollama_model,
+                                max_tokens=max_tokens,
+                                base_url=self.config.ollama_base_url,
+                            )
+                            fallback_tag = f"Executed via Ollama Fallback ({target_ollama_model})"
+                            ollama_res.thought = (
+                                f"[{fallback_tag}] {ollama_res.thought}"
+                                if ollama_res.thought
+                                else fallback_tag
+                            )
+                            return ollama_res
+                        except Exception:
+                            pass
+                    raise primary_err
         except Exception as err:
             mock_res = self._generate_mock_response(system_prompt, messages, available_tools)
             mock_res.content = f"[Notice: Local LLM fallback ({str(err)}). Showing simulated response]\n\n{mock_res.content}"
@@ -320,53 +408,73 @@ class LocalLLMClient:
         messages: List[Dict[str, Any]],
         model_name: str,
         max_tokens: Optional[int] = None,
+        base_url: Optional[str] = None,
     ) -> LLMResponse:
-        formatted = [{"role": "system", "content": system_prompt}]
-        for m in messages:
-            content = m.get("content", "")
-            msg_images = m.get("images") or []
-            msg_entry: Dict[str, Any] = {"role": m.get("role", "user")}
-            if isinstance(content, list):
-                text_parts = [
-                    item.get("text", "")
-                    for item in content
-                    if isinstance(item, dict) and item.get("type") == "text"
-                ]
-                msg_entry["content"] = " ".join(text_parts)
-            else:
-                msg_entry["content"] = str(content)
+        resolved_model = self._normalize_ollama_model(
+            model_name or self.config.ollama_model_name or "qwen3.5:9b"
+        )
+        if messages:
+            formatted = [{"role": "system", "content": system_prompt}]
+            for m in messages:
+                content = m.get("content", "")
+                msg_images = m.get("images") or []
+                msg_entry: Dict[str, Any] = {"role": m.get("role", "user")}
+                if isinstance(content, list):
+                    text_parts = [
+                        item.get("text", "")
+                        for item in content
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    ]
+                    msg_entry["content"] = " ".join(text_parts)
+                else:
+                    msg_entry["content"] = str(content)
 
-            if msg_images:
-                cleaned_imgs = []
-                for img in msg_images:
-                    if "," in img:
-                        cleaned_imgs.append(img.split(",", 1)[1])
-                    else:
-                        cleaned_imgs.append(img)
-                msg_entry["images"] = cleaned_imgs
-            formatted.append(msg_entry)
+                if msg_images:
+                    cleaned_imgs = []
+                    for img in msg_images:
+                        if "," in img:
+                            cleaned_imgs.append(img.split(",", 1)[1])
+                        else:
+                            cleaned_imgs.append(img)
+                    msg_entry["images"] = cleaned_imgs
+                formatted.append(msg_entry)
+        else:
+            formatted = [{"role": "user", "content": system_prompt}]
 
-        base = self.config.base_url.rstrip("/")
+        target_base = (
+            base_url
+            or (
+                self.config.ollama_base_url
+                if self.config.provider != "ollama"
+                else self.config.base_url
+            )
+            or "http://127.0.0.1:11434"
+        ).rstrip("/")
         opts = {"temperature": self.config.temperature}
         num_tokens = max_tokens or self.config.max_tokens
         if num_tokens:
             opts["num_predict"] = num_tokens
 
+        timeout_sec = self.config.ollama_timeout or 60
         res = requests.post(
-            f"{base}/api/chat",
+            f"{target_base}/api/chat",
             headers=self._get_headers(),
             json={
-                "model": model_name,
+                "model": resolved_model,
                 "messages": formatted,
                 "stream": False,
                 "options": opts,
             },
-            timeout=30,
+            timeout=timeout_sec,
         )
         res.raise_for_status()
         msg_obj = res.json().get("message", {})
         raw = msg_obj.get("content", "")
-        reasoning = msg_obj.get("reasoning_content") or msg_obj.get("thought")
+        reasoning = (
+            msg_obj.get("reasoning_content")
+            or msg_obj.get("thought")
+            or msg_obj.get("thinking")
+        )
         return self._parse_response(raw, reasoning=reasoning)
 
     def _call_openai_compatible_api(
@@ -438,7 +546,7 @@ class LocalLLMClient:
             if finish_reason != "length" or attempt >= 1:
                 return self._parse_response(raw, reasoning=reasoning)
 
-            current_max_tokens = max(1024, min(4096, int(current_max_tokens) * 2))
+            current_max_tokens = max(1024, min(16384, int(current_max_tokens) * 2))
             payload["max_tokens"] = current_max_tokens
 
         return self._parse_response("")
@@ -494,24 +602,44 @@ class LocalLLMClient:
         time.sleep(0.3)
         last_user = ""
         has_tool_result = False
-        for m in reversed(messages):
+        for m in messages:
             if isinstance(m, dict):
                 content_val = str(m.get("content", ""))
-                if "Tool [" in content_val or "Tool Result" in content_val or m.get("role") == "tool":
+                role = m.get("role")
+                if "Tool [" in content_val or "Tool Result" in content_val or role == "tool":
                     has_tool_result = True
-                if m.get("role") == "user" and not last_user:
+                elif role == "user" and not last_user:
                     last_user = content_val
+        if not last_user:
+            for m in reversed(messages):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    content_val = str(m.get("content", ""))
+                    if not ("Tool [" in content_val or "Tool Result" in content_val):
+                        last_user = content_val
+                        break
         if not last_user and system_prompt:
             last_user = system_prompt
 
         sys_lower = system_prompt.lower()
         user_lower = last_user.lower()
 
+        if "verifier" in sys_lower or "auditor" in sys_lower or "tier0" in sys_lower or "tier1" in sys_lower or "audit" in sys_lower:
+            return LLMResponse(
+                content="VERIFIED - All factual claims have been corroborated by search context.",
+                thought="Reviewed candidate answer against reference context and verified all claims.",
+            )
+
+        if "specialist" in sys_lower:
+            return LLMResponse(
+                content=f"### Solution Strategy\nEngineered specialized resolution for task:\n- Input: {last_user[:60]}\n- Architecture verified.",
+                thought=f"Drafted comprehensive technical solution for '{last_user[:40]}'.",
+            )
+
         # Handle tool calling when available_tools provided and not yet executed
         if available_tools and not has_tool_result:
-            if "math_eval" in available_tools and any(op in user_lower for op in ["math_eval", "calculate", "calc", "+", "*", "^", "/", "-"]):
-                expr = re.search(r"[\d\s\+\-\*\/\^\(\)\.]+", last_user)
-                clean_expr = expr.group(0).strip() if expr else "2 + 2"
+            expr_match = re.search(r"(\d+(?:\s*[\+\-\*\/\^]\s*\d+)+)", last_user)
+            if "math_eval" in available_tools and (expr_match or any(op in user_lower for op in ["math_eval", "calculate", "calc"])):
+                clean_expr = expr_match.group(1).strip() if expr_match else "2 + 2"
                 return LLMResponse(
                     content=f'```json\n{{"tool": "math_eval", "args": {{"expression": "{clean_expr}"}}}}\n```',
                     thought=f"Request requires mathematical evaluation. Calling math_eval with expression: {clean_expr}",
@@ -533,8 +661,8 @@ class LocalLLMClient:
 
         if has_tool_result:
             return LLMResponse(
-                content=f"Based on the tool execution results, here is the answer for '{last_user}':\n\nThe operation completed successfully.",
-                thought="Synthesized final answer from verified tool execution output.",
+                content=f"Here is the synthesized answer for '{last_user}':\n\nBased on verified findings, the request has been processed successfully with accurate information.",
+                thought="Synthesized clean final answer from verified tool execution output.",
             )
 
         if "supervisor" in sys_lower:

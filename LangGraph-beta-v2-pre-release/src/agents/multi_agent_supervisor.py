@@ -36,7 +36,9 @@ def _get_task(state: MultiAgentState) -> str:
     return task
 
 
-def create_multi_agent_supervisor_graph(llm_client: LocalLLMClient):
+def create_multi_agent_supervisor_graph(
+    llm_client: LocalLLMClient, checkpointer: Optional[Any] = None
+):
     workflow = StateGraph(MultiAgentState)
 
     # 1. SUPERVISOR ROUTER NODE
@@ -272,7 +274,8 @@ Draft Solution: {state.get("coder_output", "N/A")}"""
     workflow.add_edge("critic", "supervisor")
     workflow.add_edge("writer", END)
 
-    return workflow.compile()
+    active_checkpointer = checkpointer
+    return workflow.compile(checkpointer=active_checkpointer)
 
 
 # Default compiled graph instance for LangGraph Studio CLI
