@@ -836,4 +836,3 @@ class LocalLLMClient:
             content=f"Processed response for task: {last_user[:50]}...",
             thought="Analyzed user query context, evaluated relevant factors, and formulated final response.",
         )
-                                                                               
