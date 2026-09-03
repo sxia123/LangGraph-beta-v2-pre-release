@@ -1,4 +1,6 @@
 import operator
+import os
+import re
 import time
 from typing import Annotated, Any, Dict, List, Optional
 
@@ -7,6 +9,7 @@ from typing_extensions import TypedDict
 
 from src.core.local_llm import LocalLLMClient
 from src.core.soul_loader import load_soul
+from src.core.spreadsheet_parser import decipher_spreadsheet
 from src.core.tool_loader import get_tool_loader
 
 
@@ -49,6 +52,13 @@ class ChartPipelineState(TypedDict, total=False):
     # Run tracking (SQLite memory store)
     run_id: str
     run_started_at: str
+
+    # Foreign File Ingestion & Routing
+    files: Optional[List[Dict[str, Any]]]
+    has_foreign_file: bool
+    foreign_file_type: Optional[str]
+    spreadsheet_context: Optional[str]
+    spreadsheet_metadata: Optional[Dict[str, Any]]
 
 
 def _get_input(state: ChartPipelineState) -> str:
@@ -114,8 +124,25 @@ def create_chart_pipeline_graph(
             actual_query = str(query_or_state)
             curr_state = state if isinstance(state, dict) else {}
 
+        # Sanitize query: strip attachment blocks, sheet dumps, and pipe tables
+        clean_query = actual_query
+        if "--- File Attachment:" in clean_query:
+            clean_query = clean_query.split("--- File Attachment:")[0].strip()
+        if "### Sheet:" in clean_query:
+            clean_query = clean_query.split("### Sheet:")[0].strip()
+        if "## Deciphered Spreadsheet" in clean_query:
+            clean_query = clean_query.split("## Deciphered Spreadsheet")[0].strip()
+        clean_query = re.sub(r"\|.*\|", "", clean_query)
+        clean_query = " ".join(clean_query.split()).strip()
+
+        if not clean_query or len(clean_query) < 3:
+            clean_query = "enterprise spreadsheet data analysis chart"
+
+        if len(clean_query) > 150:
+            clean_query = clean_query[:150].rsplit(" ", 1)[0]
+
         res = _execute_tool_with_checkpoint(
-            curr_state, "web_search", query=actual_query, max_results=max_results, max_chars=max_chars
+            curr_state, "web_search", query=clean_query, max_results=max_results, max_chars=max_chars
         )
         if res.get("ok"):
             return str(res.get("message", ""))
@@ -300,6 +327,203 @@ def create_chart_pipeline_graph(
             "timestamp": time.strftime("%H:%M:%S"),
         }
         return {"current_step": "blocked_end", "final_response": "Request blocked during intake.", "messages": [msg]}
+
+    # 1.5. FOREIGN FILE ROUTER NODE
+    def foreign_file_router_node(state: ChartPipelineState) -> Dict[str, Any]:
+        """Inspects task and state for foreign files (spreadsheets, excel, csv, attachments).
+
+        If found, deciphers the workbook and flags has_foreign_file = True.
+        Else flags has_foreign_file = False to keep with the original pipeline.
+        """
+        task = _get_input(state)
+        raw_files = state.get("files") or []
+        if not raw_files:
+            messages = state.get("messages") or []
+            if messages and isinstance(messages[-1], dict) and messages[-1].get("files"):
+                raw_files = messages[-1].get("files")
+
+        parsed_spreadsheets = []
+        if raw_files:
+            for f in raw_files:
+                if isinstance(f, dict):
+                    fn = f.get("filename", "")
+                    content = f.get("content") or f.get("text") or ""
+                    if fn.lower().endswith((".xlsx", ".xls", ".xlsm", ".csv", ".tsv")):
+                        parsed = decipher_spreadsheet(content, filename=fn)
+                        if parsed.get("ok"):
+                            parsed_spreadsheets.append(parsed)
+
+        # Check for embedded file attachment blocks (e.g. from server.py)
+        if not parsed_spreadsheets and "--- File Attachment:" in task:
+            matches = re.findall(
+                r"--- File Attachment:\s*([^\n]+)\s*---\n([\s\S]*?)\n--- End File ---", task
+            )
+            for fn, f_body in matches:
+                clean_fn = fn.strip()
+                if clean_fn.lower().endswith((".xlsx", ".xls", ".xlsm", ".csv", ".tsv")):
+                    parsed = decipher_spreadsheet(f_body.strip(), filename=clean_fn)
+                    if parsed.get("ok"):
+                        parsed_spreadsheets.append(parsed)
+
+        # Check for spreadsheet file path mentions in prompt
+        if not parsed_spreadsheets:
+            candidates = re.findall(r"[\w\-\.]+\.(?:xlsx|xls|xlsm|csv|tsv)", task, flags=re.IGNORECASE)
+            for cand in candidates:
+                cand_path = cand if os.path.isfile(cand) else os.path.join(os.getcwd(), cand)
+                if os.path.isfile(cand_path):
+                    parsed = decipher_spreadsheet(cand_path, filename=cand)
+                    if parsed.get("ok"):
+                        parsed_spreadsheets.append(parsed)
+                        break
+
+        has_foreign = len(parsed_spreadsheets) > 0
+
+        if has_foreign:
+            combined_context = "\n\n".join(p["deciphered_context"] for p in parsed_spreadsheets)
+            spreadsheet_metadata = {
+                "files": [p["filename"] for p in parsed_spreadsheets],
+                "sheet_names": [s for p in parsed_spreadsheets for s in p.get("sheet_names", [])],
+                "metrics": {p["filename"]: p.get("metrics", {}) for p in parsed_spreadsheets},
+            }
+            msg = {
+                "id": f"msg_router_{int(time.time() * 1000)}",
+                "sender": "Foreign File Router",
+                "role": "assistant",
+                "content": (
+                    f"### Foreign File Route Activated\n"
+                    f"- Detected {len(parsed_spreadsheets)} spreadsheet file(s): {', '.join(spreadsheet_metadata['files'])}\n"
+                    f"- Sheets: {', '.join(spreadsheet_metadata['sheet_names'])}\n"
+                    f"- Routing to specialized spreadsheet deciphering & charting workflow."
+                ),
+                "timestamp": time.strftime("%H:%M:%S"),
+            }
+            return {
+                "has_foreign_file": True,
+                "foreign_file_type": "spreadsheet",
+                "spreadsheet_context": combined_context,
+                "spreadsheet_metadata": spreadsheet_metadata,
+                "current_step": "foreign_file_routed",
+                "messages": [msg],
+                "agent_thoughts": [
+                    {
+                        "agent": "Foreign File Router",
+                        "thought": f"Foreign file detected ({[p['filename'] for p in parsed_spreadsheets]}). Routing to spreadsheet deciphering pipeline.",
+                        "timestamp": time.strftime("%H:%M:%S"),
+                    }
+                ],
+            }
+        else:
+            return {
+                "has_foreign_file": False,
+                "foreign_file_type": None,
+                "spreadsheet_context": None,
+                "spreadsheet_metadata": None,
+                "current_step": "original_pipeline_routed",
+                "agent_thoughts": [
+                    {
+                        "agent": "Foreign File Router",
+                        "thought": "No foreign file detected in input. Keeping with the original pipeline.",
+                        "timestamp": time.strftime("%H:%M:%S"),
+                    }
+                ],
+            }
+
+    # 1.6. SPREADSHEET SPECIALIST NODE (for foreign file path)
+    def spreadsheet_specialist_node(state: ChartPipelineState) -> Dict[str, Any]:
+        task = _get_input(state)
+        spreadsheet_context = state.get("spreadsheet_context") or ""
+
+        soul_prompt = load_soul("specialist", fallback_prompt="You are the Lead Specialist Agent.")
+        prompt = f"""{soul_prompt}
+
+Task: "{task}"
+
+{spreadsheet_context}
+
+Available Tools:
+{tools.prompt_block()}
+
+MANDATORY SPREADSHEET ANALYSIS & VISUALIZATION REQUIREMENTS:
+1. Decipher the provided spreadsheet data: identify key metrics, variances, totals, and cross-sheet comparisons.
+2. Present a structured Executive Summary with high-priority business findings and financial/operational KPIs.
+3. Include at least one visual Mermaid chart (e.g. ```mermaid ... ``` code block using xychart-beta, bar chart, pie chart, or flowchart) illustrating the core data metrics.
+4. Structure the response with clear headings, organized markdown tables, and strategic takeaways."""
+
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="specialist", max_tokens=4096
+        )
+
+        msg = {
+            "id": f"msg_spec_{int(time.time() * 1000)}",
+            "sender": "Specialist Agent (Local AI)",
+            "role": "assistant",
+            "content": f"### Specialist Solution Draft (Local AI)\n\n{content}",
+            "timestamp": time.strftime("%H:%M:%S"),
+        }
+
+        return {
+            "specialist_output": content,
+            "current_step": "spreadsheet_specialist_complete",
+            "messages": [msg],
+            "agent_thoughts": thoughts or [
+                {
+                    "agent": "Specialist Agent",
+                    "thought": raw_thought or "Formulated spreadsheet deciphering and visual chart draft.",
+                    "timestamp": time.strftime("%H:%M:%S"),
+                }
+            ],
+        }
+
+    # 1.7. SPREADSHEET VERIFY NODE (audits against spreadsheet context rather than web search)
+    def spreadsheet_verify_node(state: ChartPipelineState) -> Dict[str, Any]:
+        task = _get_input(state)
+        soul_prompt = load_soul("tier1_verifier", fallback_prompt="You are the Spreadsheet Verification Auditor.")
+        spreadsheet_context = state.get("spreadsheet_context") or ""
+
+        prompt = f"""{soul_prompt}
+
+Task: "{task}"
+
+Output to Audit:
+{state.get("specialist_output", "")}
+
+Reference Spreadsheet Context:
+{spreadsheet_context}
+
+Available Tools:
+{tools.prompt_block()}
+
+MANDATORY AUDIT CRITERIA:
+Verify that the specialist output accurately reflects the provided spreadsheet data, calculations, and visual charts.
+Do NOT flag spreadsheet figures as unverified simply because they are private local data not present in web search.
+Respond with VERIFIED if findings match the spreadsheet data, or REVISION REQUIRED if discrepancies exist."""
+
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="tier1_verifier", max_tokens=4096
+        )
+        is_verified = "VERIFIED" in content.upper() or "APPROVED" in content.upper()
+
+        msg = {
+            "id": f"msg_ss_verify_{int(time.time() * 1000)}",
+            "sender": "Spreadsheet Verification Node",
+            "role": "assistant",
+            "content": f"### Spreadsheet Verification\n**Status**: {'VERIFIED' if is_verified else 'REVISION REQUIRED'}\n\n{content}",
+            "timestamp": time.strftime("%H:%M:%S"),
+        }
+
+        return {
+            "tier1_verified": is_verified,
+            "tier1_result": content,
+            "is_converged": is_verified,
+            "messages": [msg],
+            "agent_thoughts": thoughts or [
+                {
+                    "agent": "Spreadsheet Auditor",
+                    "thought": raw_thought or f"Spreadsheet audit complete. Verified = {is_verified}.",
+                    "timestamp": time.strftime("%H:%M:%S"),
+                }
+            ],
+        }
 
     # 2. SPECIALIST NODE (Local AI)
     def specialist_node(state: ChartPipelineState) -> Dict[str, Any]:
@@ -513,17 +737,25 @@ MANDATORY: Produce a REVISED draft that resolves every discrepancy or correction
             state, prompt, agent_name="specialist", max_tokens=4096
         )
 
+        revised_text = content.strip()
+        if (
+            len(revised_text) < 150
+            and ("VERIFIED" in revised_text.upper() or "APPROVED" in revised_text.upper())
+            and len(draft) > len(revised_text)
+        ):
+            revised_text = draft
+
         msg = {
             "id": f"msg_rev_{int(time.time() * 1000)}",
             "sender": "Revisions Node",
             "role": "assistant",
-            "content": f"### Revised Draft (post Tier 1 feedback)\n\n{content}",
+            "content": f"### Revised Draft (post Tier 1 feedback)\n\n{revised_text}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
-            "revised_output": content,
-            "specialist_output": content,
+            "revised_output": revised_text,
+            "specialist_output": revised_text,
             "messages": [msg],
             "agent_thoughts": thoughts or [
                 {
@@ -677,9 +909,26 @@ Repair the draft solution, ensuring all factual claims are verified and clearly 
             "final_verifier",
             fallback_prompt="You are the Final Answer Verifier.",
         )
-        search_context = _search_context(task, max_results=5, max_chars=16000)
+        spreadsheet_context = state.get("spreadsheet_context")
 
-        prompt = f"""{soul_prompt}
+        if spreadsheet_context:
+            prompt = f"""{soul_prompt}
+
+Task: "{task}"
+
+Candidate Final Answer:
+{solution}
+
+Reference Spreadsheet Context:
+{spreadsheet_context}
+
+Available Tools:
+{tools.prompt_block()}
+
+Review the candidate answer for correctness against the provided spreadsheet data, ensuring metrics and charts are accurate. Respond with a short rationale and end with either VERIFIED or REJECTED."""
+        else:
+            search_context = _search_context(task, max_results=5, max_chars=16000)
+            prompt = f"""{soul_prompt}
 
 Available Tools:
 {tools.prompt_block()}
@@ -1026,7 +1275,17 @@ Repair the rejected final answer, correcting every inaccuracy and filling gaps. 
     def route_intake(state: ChartPipelineState) -> str:
         if state.get("intake_status") == "BLOCKED":
             return "blocked_end"
+        return "foreign_file_router"
+
+    def route_foreign_file(state: ChartPipelineState) -> str:
+        if state.get("has_foreign_file"):
+            return "spreadsheet_specialist"
         return "specialist"
+
+    def route_spreadsheet_verify(state: ChartPipelineState) -> str:
+        if state.get("tier1_verified"):
+            return "final_verification"
+        return "revisions"
 
     def route_tier2(state: ChartPipelineState) -> str:
         if state.get("tier2_verified"):
@@ -1046,6 +1305,9 @@ Repair the rejected final answer, correcting every inaccuracy and filling gaps. 
     # BUILD GRAPH
     workflow.add_node("intake", intake_node)
     workflow.add_node("blocked_end", blocked_end_node)
+    workflow.add_node("foreign_file_router", foreign_file_router_node)
+    workflow.add_node("spreadsheet_specialist", spreadsheet_specialist_node)
+    workflow.add_node("spreadsheet_verify", spreadsheet_verify_node)
     workflow.add_node("specialist", specialist_node)
     workflow.add_node("tier0_checks", tier0_checks_node)
     workflow.add_node("tier05_web_verify", tier05_web_verify_node)
@@ -1065,10 +1327,26 @@ Repair the rejected final answer, correcting every inaccuracy and filling gaps. 
     # EDGES
     workflow.add_edge(START, "intake")
     workflow.add_conditional_edges(
-        "intake", route_intake, {"specialist": "specialist", "blocked_end": "blocked_end"}
+        "intake", route_intake, {"foreign_file_router": "foreign_file_router", "blocked_end": "blocked_end"}
     )
     workflow.add_edge("blocked_end", END)
 
+    # Conditional router: if foreign file detected -> new path, else -> original pipeline
+    workflow.add_conditional_edges(
+        "foreign_file_router",
+        route_foreign_file,
+        {"spreadsheet_specialist": "spreadsheet_specialist", "specialist": "specialist"},
+    )
+
+    # New Foreign File Branch
+    workflow.add_edge("spreadsheet_specialist", "spreadsheet_verify")
+    workflow.add_conditional_edges(
+        "spreadsheet_verify",
+        route_spreadsheet_verify,
+        {"final_verification": "final_verification", "revisions": "revisions"},
+    )
+
+    # Original Pipeline Branch (100% preserved)
     workflow.add_edge("specialist", "tier0_checks")
     workflow.add_edge("tier0_checks", "tier05_web_verify")
     workflow.add_edge("tier05_web_verify", "tier1_verify")

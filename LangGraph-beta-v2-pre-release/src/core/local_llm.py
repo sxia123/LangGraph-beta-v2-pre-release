@@ -335,7 +335,7 @@ class LocalLLMClient:
         images: Optional[List[str]] = None,
     ) -> LLMResponse:
         if self.config.provider == "mock":
-            return self._generate_mock_response(system_prompt, messages, available_tools)
+            return self._generate_mock_response(system_prompt, messages, available_tools, agent=agent)
 
         try:
             effective_model = self._resolve_model_name(agent=agent, model_name=model_name)
@@ -598,6 +598,7 @@ class LocalLLMClient:
         system_prompt: str,
         messages: List[Dict[str, Any]],
         available_tools: Optional[List[str]] = None,
+        agent: Optional[str] = None,
     ) -> LLMResponse:
         time.sleep(0.3)
         last_user = ""
@@ -622,14 +623,57 @@ class LocalLLMClient:
 
         sys_lower = system_prompt.lower()
         user_lower = last_user.lower()
+        agent_name = (agent or "").lower()
 
-        if "verifier" in sys_lower or "auditor" in sys_lower or "tier0" in sys_lower or "tier1" in sys_lower or "audit" in sys_lower:
+        if agent_name in ["specialist", "frontier_escalation", "adjudicator_repair"]:
+            pass  # Proceed directly to specialist response below
+        elif (
+            agent_name in ["tier0_auditor", "tier1_verifier", "final_verifier", "verifier", "auditor", "critic"]
+            or any(k in sys_lower for k in ["you are the tier 0", "you are the tier 1", "you are the final answer verifier", "mandatory: cross-reference", "mandatory audit criteria"])
+        ):
+            if "spreadsheet" in sys_lower or "spreadsheet" in user_lower or "sheet" in sys_lower:
+                return LLMResponse(
+                    content="VERIFIED - All spreadsheet metrics, variances, and visual charts match the reference workbook.",
+                    thought="Audited specialist draft against provided spreadsheet tables; confirmed calculations and visual charts are consistent.",
+                )
             return LLMResponse(
                 content="VERIFIED - All factual claims have been corroborated by search context.",
                 thought="Reviewed candidate answer against reference context and verified all claims.",
             )
 
-        if "specialist" in sys_lower:
+        if "specialist" in sys_lower or agent_name == "specialist":
+            if "spreadsheet" in sys_lower or "spreadsheet" in user_lower or "sheet:" in user_lower or ".xlsx" in user_lower or ".csv" in user_lower:
+                content_text = (
+                    "### Executive Summary\n"
+                    "Analysis of the provided spreadsheet dataset reveals strong operational and financial performance across reporting business units.\n\n"
+                    "### Key Metrics & Deciphered Variance\n"
+                    "- **Total Actual Revenue**: $10,550,000 against a $9,100,000 target (+15.9% overall variance).\n"
+                    "- **Top Growth Driver**: Autonomous Agents SDK and AI Enterprise Suite exhibited the highest YoY adoption rates.\n"
+                    "- **Operating Discipline**: Expenses stayed strictly within forecast thresholds.\n\n"
+                    "### Segment Performance Breakdown\n"
+                    "| Region / Segment | Target ($) | Actual ($) | Variance ($) | Status |\n"
+                    "| --- | --- | --- | --- | --- |\n"
+                    "| North America Enterprise AI | $2,500,000 | $2,950,000 | +$450,000 | Exceeded |\n"
+                    "| North America GPU Compute | $1,800,000 | $2,100,000 | +$300,000 | Exceeded |\n"
+                    "| Europe Enterprise AI | $1,600,000 | $1,550,000 | -$50,000 | On Track |\n"
+                    "| Asia Pacific Autonomous Agents | $1,200,000 | $1,650,000 | +$450,000 | Exceeded |\n\n"
+                    "### Visual Performance Chart\n"
+                    "```mermaid\n"
+                    "xychart-beta\n"
+                    '    title "Q1 Performance: Target vs Actual Revenue ($M)"\n'
+                    '    x-axis ["NA AI", "NA GPU", "EU AI", "APAC Agents"]\n'
+                    '    y-axis "Revenue ($M)" 0 --> 4\n'
+                    "    bar [2.5, 1.8, 1.6, 1.2]\n"
+                    "    bar [2.95, 2.1, 1.55, 1.65]\n"
+                    "```\n\n"
+                    "### Strategic Takeaways\n"
+                    "1. Expand high-density compute clusters to sustain regional AI platform demand.\n"
+                    "2. Replicate the APAC go-to-market playbook across emerging enterprise accounts."
+                )
+                return LLMResponse(
+                    content=content_text,
+                    thought="Deciphered multi-sheet spreadsheet dataset, synthesized variance calculations, and constructed interactive Mermaid performance charts.",
+                )
             return LLMResponse(
                 content=f"### Solution Strategy\nEngineered specialized resolution for task:\n- Input: {last_user[:60]}\n- Architecture verified.",
                 thought=f"Drafted comprehensive technical solution for '{last_user[:40]}'.",
