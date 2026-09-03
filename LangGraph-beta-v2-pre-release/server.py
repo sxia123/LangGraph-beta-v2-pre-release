@@ -1,4 +1,5 @@
 import json
+import logging
 import operator
 import os
 import queue as _queue
@@ -40,6 +41,8 @@ from src.core.memory_store import (
 )
 from src.core.tool_loader import get_tool_loader
 
+logger = logging.getLogger("server")
+
 app = FastAPI(title="LangGraph Web API Server", version="1.0.0")
 
 app.add_middleware(
@@ -59,6 +62,8 @@ class DirectChatState(TypedDict, total=False):
     final_response: str
     agent_thoughts: Annotated[List[Dict[str, Any]], operator.add]
     run_id: Optional[str]
+    images: Optional[List[str]]
+    files: Optional[List[Dict[str, Any]]]
 
 
 def create_direct_chat_graph(
@@ -70,7 +75,7 @@ def create_direct_chat_graph(
     def direct_chat_node(state: DirectChatState) -> Dict[str, Any]:
         messages = state.get("messages", [])
         last_user = messages[-1] if messages else {}
-        images = last_user.get("images") or []
+        images = state.get("images") or last_user.get("images") or []
         run_id = state.get("run_id")
 
         tool_prompt = (
@@ -329,6 +334,7 @@ def extract_file_text(filename: str, raw_content: str) -> str:
     if fn_lower.endswith((".xlsx", ".xls", ".xlsm")):
         try:
             import io
+
             import openpyxl
 
             wb = None
@@ -413,6 +419,51 @@ def extract_file_text(filename: str, raw_content: str) -> str:
                     return "\n".join(md_table)
         except Exception as err:
             logger.warning("Error parsing CSV/TSV %s: %s", filename, err)
+
+    # 3. PDF Document parsing (.pdf)
+    if fn_lower.endswith(".pdf"):
+        try:
+            from src.core.document_parser import parse_pdf
+
+            source_val = decoded_bytes or disk_path or raw_content
+            res = parse_pdf(source_val, filename=filename)
+            if res.get("ok") and res.get("extracted_text"):
+                return res.get("extracted_text")
+            logger.warning("PDF parse issue for %s: %s", filename, res.get("summary"))
+        except Exception as err:
+            logger.warning("Error parsing PDF %s: %s", filename, err)
+
+    # 4. Word Document parsing (.docx, .doc)
+    if fn_lower.endswith((".docx", ".doc")):
+        try:
+            from src.core.document_parser import parse_docx
+
+            source_val = decoded_bytes or disk_path or raw_content
+            res = parse_docx(source_val, filename=filename)
+            if res.get("ok") and res.get("extracted_text"):
+                return res.get("extracted_text")
+            logger.warning("DOCX parse issue for %s: %s", filename, res.get("summary"))
+        except Exception as err:
+            logger.warning("Error parsing DOCX %s: %s", filename, err)
+
+    # 5. PowerPoint Slideshow parsing (.pptx, .ppt)
+    if fn_lower.endswith((".pptx", ".ppt")):
+        try:
+            from src.core.document_parser import parse_slideshow
+
+            source_val = decoded_bytes or disk_path or raw_content
+            res = parse_slideshow(source_val, filename=filename)
+            if res.get("ok") and res.get("extracted_text"):
+                return res.get("extracted_text")
+            logger.warning("PPTX parse issue for %s: %s", filename, res.get("summary"))
+        except Exception as err:
+            logger.warning("Error parsing PPTX %s: %s", filename, err)
+
+    # 6. Photos & Images (.png, .jpg, .jpeg, .webp, .gif, .bmp, .svg)
+    if fn_lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg")) or (
+        raw_content.startswith("data:image/")
+    ):
+        return f"[Image / Photo Attachment: {filename}]"
 
     if decoded_bytes is not None:
         try:
@@ -740,13 +791,23 @@ def handle_chat_stream(req: ChatRequest):
             },
         )
 
+        effective_images = list(req.images or [])
+        if req.files:
+            for f in req.files:
+                if isinstance(f, dict):
+                    fn = (f.get("filename") or "").lower()
+                    cnt = f.get("content") or f.get("text") or ""
+                    if fn.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg")) or cnt.startswith("data:image/"):
+                        if cnt and cnt not in effective_images:
+                            effective_images.append(cnt)
+
         user_message_entry = {
             "id": user_msg_id,
             "sender": "User",
             "role": "user",
             "content": effective_prompt,
             "timestamp": timestamp,
-            "images": req.images or [],
+            "images": effective_images,
             "files": req.files or [],
         }
 
@@ -757,6 +818,8 @@ def handle_chat_stream(req: ChatRequest):
                 "user_input": effective_prompt,
                 "final_response": "",
                 "agent_thoughts": [],
+                "images": effective_images,
+                "files": req.files or [],
             }
         elif pipeline_choice in ["chart", "chart_pipeline"]:
             initial_input = {
@@ -765,6 +828,8 @@ def handle_chat_stream(req: ChatRequest):
                 "user_input": effective_prompt,
                 "current_step": "intake",
                 "agent_thoughts": [],
+                "images": effective_images,
+                "files": req.files or [],
             }
         elif pipeline_choice in ["code_review", "code"]:
             initial_input = {

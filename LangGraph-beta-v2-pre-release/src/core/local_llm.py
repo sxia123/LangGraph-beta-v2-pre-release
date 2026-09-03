@@ -335,7 +335,9 @@ class LocalLLMClient:
         images: Optional[List[str]] = None,
     ) -> LLMResponse:
         if self.config.provider == "mock":
-            return self._generate_mock_response(system_prompt, messages, available_tools, agent=agent)
+            return self._generate_mock_response(
+                system_prompt, messages, available_tools, agent=agent, images=images
+            )
 
         try:
             effective_model = self._resolve_model_name(agent=agent, model_name=model_name)
@@ -599,14 +601,18 @@ class LocalLLMClient:
         messages: List[Dict[str, Any]],
         available_tools: Optional[List[str]] = None,
         agent: Optional[str] = None,
+        images: Optional[List[str]] = None,
     ) -> LLMResponse:
         time.sleep(0.3)
         last_user = ""
         has_tool_result = False
+        has_images = bool(images)
         for m in messages:
             if isinstance(m, dict):
                 content_val = str(m.get("content", ""))
                 role = m.get("role")
+                if m.get("images"):
+                    has_images = True
                 if "Tool [" in content_val or "Tool Result" in content_val or role == "tool":
                     has_tool_result = True
                 elif role == "user" and not last_user:
@@ -631,10 +637,10 @@ class LocalLLMClient:
             agent_name in ["tier0_auditor", "tier1_verifier", "final_verifier", "verifier", "auditor", "critic"]
             or any(k in sys_lower for k in ["you are the tier 0", "you are the tier 1", "you are the final answer verifier", "mandatory: cross-reference", "mandatory audit criteria"])
         ):
-            if "spreadsheet" in sys_lower or "spreadsheet" in user_lower or "sheet" in sys_lower:
+            if any(k in sys_lower or k in user_lower for k in ["spreadsheet", "sheet", "document", "slideshow", "slide", "image", "photo"]):
                 return LLMResponse(
-                    content="VERIFIED - All spreadsheet metrics, variances, and visual charts match the reference workbook.",
-                    thought="Audited specialist draft against provided spreadsheet tables; confirmed calculations and visual charts are consistent.",
+                    content="VERIFIED - All reference metrics, document takeaways, slide roadmaps, and visual charts match the provided inputs.",
+                    thought="Audited specialist draft against provided reference context; confirmed calculations, architecture, and visual charts are consistent.",
                 )
             return LLMResponse(
                 content="VERIFIED - All factual claims have been corroborated by search context.",
@@ -642,15 +648,64 @@ class LocalLLMClient:
             )
 
         if "specialist" in sys_lower or agent_name == "specialist":
-            if "spreadsheet" in sys_lower or "spreadsheet" in user_lower or "sheet:" in user_lower or ".xlsx" in user_lower or ".csv" in user_lower:
+            # 1. Slideshow & presentation analysis
+            if "mandatory slideshow" in sys_lower or any(k in user_lower for k in [".pptx", ".ppt", "deciphered slideshow"]):
+                    "Synthesis of the slide presentation outlines strategic roadmap milestones, quarterly achievements, and resource allocation plans.\n\n"
+                    "### Slide Deck Breakdown & Agenda\n"
+                    "- **Slide 1 (Executive Summary)**: Q1 revenue targets exceeded across major AI platform segments.\n"
+                    "- **Slide 2 (Architecture Roadmap)**: Scaling agentic pipelines and persistent memory infrastructure.\n"
+                    "- **Slide 3 (Execution Plan)**: Cross-functional deployment with enterprise audit checkpoints.\n\n"
+                    "### Presentation Roadmap & Timeline\n"
+                    "```mermaid\n"
+                    "timeline\n"
+                    "    title Q1 Presentation Strategic Roadmap\n"
+                    "    section Milestone 1\n"
+                    "        Week 1-2 : Intake & Multi-format Parsing\n"
+                    "    section Milestone 2\n"
+                    "        Week 3-4 : Verification Gate Convergence\n"
+                    "    section Milestone 3\n"
+                    "        Week 5-6 : Enterprise Deployment\n"
+                    "```\n\n"
+                    "### Strategic Takeaways\n"
+                    "1. Align operational roadmaps directly with quarterly slide deck objectives.\n"
+                    "2. Maintain slide milestone pacing to meet project delivery schedules."
+                )
+                return LLMResponse(
+                    content=content_text,
+                    thought="Synthesized presentation deck and created Mermaid timeline chart.",
+                )
+
+            # 2. Spreadsheet analysis & variance charts
+            if "mandatory spreadsheet" in sys_lower or any(k in user_lower for k in [".xlsx", ".xls", ".csv", ".tsv", "deciphered spreadsheet analysis"]):
                 content_text = (
                     "### Executive Summary\n"
                     "Analysis of the provided spreadsheet dataset reveals strong operational and financial performance across reporting business units.\n\n"
                     "### Key Metrics & Deciphered Variance\n"
-                    "- **Total Actual Revenue**: $10,550,000 against a $9,100,000 target (+15.9% overall variance).\n"
+                    "- **Total Actual Revenue**: $20,640,000 against an $18,200,000 target (+13.4% overall portfolio overachievement).\n"
                     "- **Top Growth Driver**: Autonomous Agents SDK and AI Enterprise Suite exhibited the highest YoY adoption rates.\n"
                     "- **Operating Discipline**: Expenses stayed strictly within forecast thresholds.\n\n"
                     "### Segment Performance Breakdown\n"
+                    "| Region / Segment | Target ($) | Actual ($) | Variance ($) | Status |\n"
+                    "| --- | --- | --- | --- | --- |\n"
+                    "| North America Enterprise | $4,500,000 | $5,250,000 | +$750,000 | Exceeded |\n"
+                    "| North America Mid-Market | $2,200,000 | $2,480,000 | +$280,000 | Exceeded |\n"
+                    "| Europe / UK Financial AI | $3,800,000 | $3,650,000 | -$150,000 | On Track |\n"
+                    "| Asia Pacific Agents SDK | $1,900,000 | $2,420,000 | +$520,000 | Exceeded |\n"
+                    "| Global Strategic Accounts | $5,000,000 | $5,950,000 | +$950,000 | Exceeded |\n\n"
+                    "### Visual Performance Chart\n"
+                    "```mermaid\n"
+                    "xychart-beta\n"
+                    '    title "Q1 Performance: Target vs Actual Revenue ($M)"\n'
+                    '    x-axis ["NA Ent", "NA Mid", "EU Fin", "APAC SDK", "Global"]\n'
+                    '    y-axis "Revenue ($M)" 0 --> 7\n'
+                    "    bar [4.5, 2.2, 3.8, 1.9, 5.0]\n"
+                    "    bar [5.25, 2.48, 3.65, 2.42, 5.95]\n"
+                    "```\n\n"
+                    "### Strategic Takeaways\n"
+                    "1. Expand high-density compute clusters to sustain regional AI platform demand.\n"
+                    "2. Replicate the APAC go-to-market playbook across emerging enterprise accounts."
+                    content=content_text,
+                    thought="Deciphered multi-sheet spreadsheet dataset, synthesized variance calculations, and constructed interactive Mermaid performance charts.",
                     "| Region / Segment | Target ($) | Actual ($) | Variance ($) | Status |\n"
                     "| --- | --- | --- | --- | --- |\n"
                     "| North America Enterprise AI | $2,500,000 | $2,950,000 | +$450,000 | Exceeded |\n"
@@ -677,6 +732,19 @@ class LocalLLMClient:
             return LLMResponse(
                 content=f"### Solution Strategy\nEngineered specialized resolution for task:\n- Input: {last_user[:60]}\n- Architecture verified.",
                 thought=f"Drafted comprehensive technical solution for '{last_user[:40]}'.",
+            )
+
+        # Direct Chat / Vision with images
+        if has_images or "image / photo attachment" in user_lower or "photo" in user_lower:
+            return LLMResponse(
+                content=(
+                    "### Visual Analysis & Interpretation\n"
+                    "Based on the visual analysis of the attached image:\n\n"
+                    "- **Subject & Layout**: The image presents a multi-tier technical architecture and performance dashboard.\n"
+                    "- **Key Visual Elements**: Shows data flow pipelines, verification nodes, and performance metrics.\n"
+                    "- **Status**: All visual structures and indicators are consistent with high-integrity operational standards."
+                ),
+                thought="Analyzed visual elements, layout structure, and optical contents from attached image.",
             )
 
         # Handle tool calling when available_tools provided and not yet executed
@@ -768,3 +836,4 @@ class LocalLLMClient:
             content=f"Processed response for task: {last_user[:50]}...",
             thought="Analyzed user query context, evaluated relevant factors, and formulated final response.",
         )
+                                                                               
