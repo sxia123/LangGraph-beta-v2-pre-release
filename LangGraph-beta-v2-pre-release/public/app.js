@@ -402,7 +402,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function handleFileInput(file) {
     if (!file) return;
 
-    if (file.type.startsWith('image/')) {
+    const fileType = (file.type || '').toLowerCase();
+    const fileName = file.name || 'document';
+
+    if (fileType.startsWith('image/')) {
       const reader = new FileReader();
       reader.onload = (e) => {
         stagedImages.push(e.target.result);
@@ -410,15 +413,15 @@ document.addEventListener('DOMContentLoaded', () => {
       };
       reader.readAsDataURL(file);
     } else {
-      const isBinaryDoc = /\.(xlsx|xls|xlsm|docx|pptx|pdf|zip|tar|gz|bin)$/i.test(file.name) ||
-                          file.type.includes('spreadsheet') ||
-                          file.type.includes('excel') ||
-                          file.type.includes('officedocument');
+      const isBinaryDoc = /\.(xlsx|xls|xlsm|docx|pptx|pdf|zip|tar|gz|bin)$/i.test(fileName) ||
+                          fileType.includes('spreadsheet') ||
+                          fileType.includes('excel') ||
+                          fileType.includes('officedocument');
 
       const reader = new FileReader();
       reader.onload = (e) => {
         stagedFiles.push({
-          filename: file.name,
+          filename: fileName,
           content: e.target.result,
           size: file.size,
           type: file.type || (isBinaryDoc ? 'application/octet-stream' : 'text/plain'),
@@ -429,7 +432,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const binReader = new FileReader();
         binReader.onload = (be) => {
           stagedFiles.push({
-            filename: file.name,
+            filename: fileName,
             content: be.target.result,
             size: file.size,
             type: file.type || 'application/octet-stream',
@@ -723,12 +726,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 100);
 
     try {
+      const effectivePrompt = promptText || (currentFiles.length > 0 ? `Please analyze and summarize the attached file(s): ${currentFiles.map(f => f.filename).join(', ')}.` : (currentAttachments.length > 0 ? 'Please describe and analyze the attached image(s).' : ''));
+
       const res = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: activeAbortController.signal,
         body: JSON.stringify({
-          prompt: promptText,
+          prompt: effectivePrompt,
           images: currentAttachments.length > 0 ? currentAttachments : null,
           files: currentFiles.length > 0 ? currentFiles : null,
           pipeline: activePipeline,

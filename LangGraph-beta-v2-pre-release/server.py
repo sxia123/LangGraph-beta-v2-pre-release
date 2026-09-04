@@ -1,4 +1,7 @@
+import csv
+import io
 import json
+import logging
 import operator
 import os
 import queue as _queue
@@ -39,6 +42,8 @@ from src.core.memory_store import (
     start_run,
 )
 from src.core.tool_loader import get_tool_loader
+
+logger = logging.getLogger("server")
 
 app = FastAPI(title="LangGraph Web API Server", version="1.0.0")
 
@@ -290,32 +295,52 @@ def stop_chat_stream(payload: Optional[ChatStopRequest] = None):
 
 
 def extract_file_text(filename: str, raw_content: str) -> str:
-    """Extracts readable text/markdown from uploaded raw file content or data URI."""
-    if not raw_content:
-        return ""
-
+    """Extracts readable text/markdown from uploaded raw file content, data URI, or disk path."""
+    raw_content = raw_content or ""
     decoded_bytes: Optional[bytes] = None
+
     if raw_content.startswith("data:"):
         try:
             import base64
 
             _header, encoded = raw_content.split(",", 1)
             decoded_bytes = base64.b64decode(encoded)
-        except Exception:
-            pass
+        except Exception as err:
+            logger.warning("Failed to decode data URI for %s: %s", filename, err)
+    elif raw_content and not os.path.isfile(raw_content):
+        # Only attempt raw base64 decode if the filename indicates a binary file
+        fn_binary = (filename or "").lower().endswith(
+            (".xlsx", ".xls", ".xlsm", ".docx", ".pptx", ".pdf", ".zip", ".bin")
+        )
+        if fn_binary:
+            try:
+                import base64
 
-    fn_lower = filename.lower()
+                decoded_bytes = base64.b64decode(raw_content)
+            except Exception:
+                decoded_bytes = None
+
+    # Resolve disk path fallback if content is empty or points to an existing file
+    disk_path = None
+    if raw_content and os.path.isfile(raw_content):
+        disk_path = raw_content
+    elif filename and os.path.isfile(filename):
+        disk_path = filename
+    elif filename and os.path.isfile(os.path.join(os.getcwd(), filename)):
+        disk_path = os.path.join(os.getcwd(), filename)
+
+    fn_lower = (filename or "").lower()
+
+    # 1. Native Excel spreadsheet parsing (.xlsx, .xls, .xlsm)
     if fn_lower.endswith((".xlsx", ".xls", ".xlsm")):
         try:
-            import io
-
             import openpyxl
 
             wb = None
             if decoded_bytes is not None:
                 wb = openpyxl.load_workbook(io.BytesIO(decoded_bytes), data_only=True)
-            elif os.path.isfile(raw_content):
-                wb = openpyxl.load_workbook(raw_content, data_only=True)
+            elif disk_path:
+                wb = openpyxl.load_workbook(disk_path, data_only=True)
 
             if wb:
                 md_sheets = []
@@ -324,22 +349,72 @@ def extract_file_text(filename: str, raw_content: str) -> str:
                     rows = list(ws.iter_rows(values_only=True))
                     if not rows:
                         continue
-                    header = [str(c if c is not None else "") for c in rows[0]]
+                    # Clean header cells
+                    header = [
+                        str(c if c is not None else "").replace("\n", " ").replace("|", "\\|")
+                        for c in rows[0]
+                    ]
                     md_table = [
                         f"### Sheet: {sheet_name}",
                         "",
                         "| " + " | ".join(header) + " |",
-                        "| " + " | ".join(["---"] * len(header)) + " |",
+                        "| " + " | ".join(["---"] * max(1, len(header))) + " |",
                     ]
-                    for row in rows[1:]:
-                        if any(c is not None for c in row):
-                            cells = [str(c if c is not None else "") for c in row]
-                            md_table.append("| " + " | ".join(cells) + " |")
+                    row_limit = 150
+                    data_rows = [r for r in rows[1:] if any(c is not None for c in r)]
+                    for row in data_rows[:row_limit]:
+                        cells = [
+                            str(c if c is not None else "").replace("\n", " ").replace("|", "\\|")
+                            for c in row
+                        ]
+                        md_table.append("| " + " | ".join(cells) + " |")
+                    if len(data_rows) > row_limit:
+                        md_table.append(
+                            f"\n*... ({len(data_rows) - row_limit} additional rows omitted for token budget)*"
+                        )
                     md_sheets.append("\n".join(md_table))
                 if md_sheets:
                     return "\n\n".join(md_sheets)
-        except Exception:
-            pass
+                return f"[Excel workbook '{filename}' contains no readable data or sheets.]"
+        except Exception as err:
+            logger.warning("Error parsing Excel spreadsheet %s: %s", filename, err)
+            return f"[Notice: Unable to parse Excel file '{filename}' ({err}). Please ensure the workbook is not password-protected.]"
+
+    # 2. CSV / TSV spreadsheet parsing
+    if fn_lower.endswith((".csv", ".tsv")):
+        try:
+            csv_text = None
+            if decoded_bytes is not None:
+                try:
+                    csv_text = decoded_bytes.decode("utf-8")
+                except Exception:
+                    csv_text = decoded_bytes.decode("latin-1", errors="replace")
+            elif disk_path:
+                with open(disk_path, "r", encoding="utf-8", errors="replace") as cf:
+                    csv_text = cf.read()
+            elif raw_content:
+                csv_text = raw_content
+
+            if csv_text:
+                delim = "\t" if fn_lower.endswith(".tsv") else ","
+                reader = list(csv.reader(io.StringIO(csv_text), delimiter=delim))
+                if reader:
+                    header = [str(c).replace("\n", " ").replace("|", "\\|") for c in reader[0]]
+                    md_table = [
+                        "| " + " | ".join(header) + " |",
+                        "| " + " | ".join(["---"] * max(1, len(header))) + " |",
+                    ]
+                    row_limit = 150
+                    for row in reader[1:row_limit]:
+                        cells = [str(c).replace("\n", " ").replace("|", "\\|") for c in row]
+                        md_table.append("| " + " | ".join(cells) + " |")
+                    if len(reader) - 1 > row_limit:
+                        md_table.append(
+                            f"\n*... ({len(reader) - 1 - row_limit} additional rows omitted for token budget)*"
+                        )
+                    return "\n".join(md_table)
+        except Exception as err:
+            logger.warning("Error parsing CSV/TSV %s: %s", filename, err)
 
     if decoded_bytes is not None:
         try:
@@ -578,8 +653,19 @@ def remove_run(run_id: str):
 def handle_chat_stream(req: ChatRequest):
     """Executes selected LangGraph pipeline and streams step outputs via SSE."""
     prompt = req.prompt.strip()
-    if not prompt and not req.images:
-        raise HTTPException(status_code=400, detail="Prompt or image cannot be empty.")
+    if not prompt and not req.images and not req.files:
+        raise HTTPException(
+            status_code=400,
+            detail="Prompt, image, or file attachment cannot be empty.",
+        )
+
+    if not prompt and req.files:
+        attached_names = [f.get("filename", "file") for f in req.files if isinstance(f, dict)]
+        prompt = (
+            f"Please analyze and summarize the attached spreadsheet/document: {', '.join(attached_names)}."
+            if attached_names
+            else "Please analyze and summarize the attached document."
+        )
 
     pipeline_choice = (req.pipeline or "master").lower()
     timestamp = time.strftime("%H:%M:%S")
@@ -867,5 +953,6 @@ if os.path.exists(public_dir):
 if __name__ == "__main__":
     import uvicorn
 
-    # Web UI server runs on port 8080 to avoid port conflict with oMLX server on port 8000
-    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True)
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True, app_dir=app_dir)
+
