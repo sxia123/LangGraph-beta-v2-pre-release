@@ -400,9 +400,18 @@ class LocalLLMClient:
                             pass
                     raise primary_err
         except Exception as err:
-            mock_res = self._generate_mock_response(system_prompt, messages, available_tools)
-            mock_res.content = f"[Notice: Local LLM fallback ({str(err)}). Showing simulated response]\n\n{mock_res.content}"
-            return mock_res
+            target_endpoint = (
+                self.config.ollama_base_url
+                if self.config.provider == "ollama"
+                else self.config.base_url
+            )
+            fallback_info = ""
+            if self.config.enable_ollama_fallback and self.config.provider != "ollama":
+                fallback_info = f" (Ollama fallback at {self.config.ollama_base_url} was also unreachable)"
+            raise ConnectionError(
+                f"Local LLM connection failed for provider '{self.config.provider}' at {target_endpoint}{fallback_info}: {err}. "
+                f"Please ensure your local inference engine (e.g. oMLX on Apple Silicon or Ollama) is running and accessible."
+            ) from err
 
     def _call_ollama_api(
         self,
@@ -599,6 +608,11 @@ class LocalLLMClient:
         agent: Optional[str] = None,
         images: Optional[List[str]] = None,
     ) -> LLMResponse:
+        if self.config.provider != "mock":
+            raise RuntimeError(
+                "Mock response generation is strictly disabled. A real local LLM connection is required. "
+                "Set LLM_PROVIDER='mock' if explicitly running offline test suites."
+            )
         time.sleep(0.3)
         last_user = ""
         has_tool_result = False
@@ -644,118 +658,58 @@ class LocalLLMClient:
             )
 
         if "specialist" in sys_lower or agent_name == "specialist":
-            # 1. Slideshow & presentation analysis
-            if "mandatory slideshow" in sys_lower or any(k in user_lower for k in [".pptx", ".ppt", "deciphered slideshow"]):
-                content_text = (
-                    "### Executive Summary\n"
-                    "Synthesis of the slide presentation outlines strategic roadmap milestones, quarterly achievements, and resource allocation plans.\n\n"
-                    "### Slide Deck Breakdown & Agenda\n"
-                    "- **Slide 1 (Executive Summary)**: Q1 revenue targets exceeded across major AI platform segments.\n"
-                    "- **Slide 2 (Architecture Roadmap)**: Scaling agentic pipelines and persistent memory infrastructure.\n"
-                    "- **Slide 3 (Execution Plan)**: Cross-functional deployment with enterprise audit checkpoints.\n\n"
-                    "### Presentation Roadmap & Timeline\n"
-                    "```mermaid\n"
-                    "timeline\n"
-                    "    title Q1 Presentation Strategic Roadmap\n"
-                    "    section Milestone 1\n"
-                    "        Week 1-2 : Intake & Multi-format Parsing\n"
-                    "    section Milestone 2\n"
-                    "        Week 3-4 : Verification Gate Convergence\n"
-                    "    section Milestone 3\n"
-                    "        Week 5-6 : Enterprise Deployment\n"
-                    "```\n\n"
-                    "### Strategic Takeaways\n"
-                    "1. Align operational roadmaps directly with quarterly slide deck objectives.\n"
-                    "2. Maintain slide milestone pacing to meet project delivery schedules."
-                )
-                return LLMResponse(
-                    content=content_text,
-                    thought="Synthesized presentation deck and created Mermaid timeline chart.",
-                )
-
-            # 2. Spreadsheet analysis & variance charts
-            if "mandatory spreadsheet" in sys_lower or any(k in user_lower for k in [".xlsx", ".xls", ".csv", ".tsv", "deciphered spreadsheet analysis"]):
-                content_text = (
-                    "### Executive Summary\n"
-                    "Analysis of the provided spreadsheet dataset reveals strong operational and financial performance across reporting business units.\n\n"
-                    "### Key Metrics & Deciphered Variance\n"
-                    "- **Total Actual Revenue**: $20,640,000 against an $18,200,000 target (+13.4% overall portfolio overachievement).\n"
-                    "- **Top Growth Driver**: Autonomous Agents SDK and AI Enterprise Suite exhibited the highest YoY adoption rates.\n"
-                    "- **Operating Discipline**: Expenses stayed strictly within forecast thresholds.\n\n"
-                    "### Segment Performance Breakdown\n"
-                    "| Region / Segment | Target ($) | Actual ($) | Variance ($) | Status |\n"
-                    "| --- | --- | --- | --- | --- |\n"
-                    "| North America Enterprise | $4,500,000 | $5,250,000 | +$750,000 | Exceeded |\n"
-                    "| North America Mid-Market | $2,200,000 | $2,480,000 | +$280,000 | Exceeded |\n"
-                    "| Europe / UK Financial AI | $3,800,000 | $3,650,000 | -$150,000 | On Track |\n"
-                    "| Asia Pacific Agents SDK | $1,900,000 | $2,420,000 | +$520,000 | Exceeded |\n"
-                    "| Global Strategic Accounts | $5,000,000 | $5,950,000 | +$950,000 | Exceeded |\n\n"
-                    "### Visual Performance Chart\n"
+            summary_title = last_user.split("\n")[0][:80].strip() or "Task Analysis"
+            if any(k in user_lower or k in sys_lower for k in [".xlsx", ".xls", ".csv", ".tsv", "spreadsheet"]):
+                chart_code = (
                     "```mermaid\n"
                     "xychart-beta\n"
-                    '    title "Q1 Performance: Target vs Actual Revenue ($M)"\n'
-                    '    x-axis ["NA Ent", "NA Mid", "EU Fin", "APAC SDK", "Global"]\n'
-                    '    y-axis "Revenue ($M)" 0 --> 7\n'
-                    "    bar [4.5, 2.2, 3.8, 1.9, 5.0]\n"
-                    "    bar [5.25, 2.48, 3.65, 2.42, 5.95]\n"
-                    "```\n\n"
-                    "### Strategic Takeaways\n"
-                    "1. Expand high-density compute clusters to sustain regional AI platform demand.\n"
-                    "2. Replicate the APAC go-to-market playbook across emerging enterprise accounts."
+                    '    title "Spreadsheet Data Metrics"\n'
+                    '    x-axis ["Metric A", "Metric B", "Metric C"]\n'
+                    '    y-axis "Value" 0 --> 100\n'
+                    "    bar [30, 65, 85]\n"
+                    "```"
                 )
-                return LLMResponse(
-                    content=content_text,
-                    thought="Deciphered multi-sheet spreadsheet dataset, synthesized variance calculations, and constructed interactive Mermaid performance charts.",
+            elif any(k in user_lower or k in sys_lower for k in [".pptx", ".ppt", "slideshow"]):
+                chart_code = (
+                    "```mermaid\n"
+                    "timeline\n"
+                    "    title Presentation Timeline\n"
+                    "    section Phase 1\n"
+                    "        Step 1 : Initial Setup\n"
+                    "    section Phase 2\n"
+                    "        Step 2 : Execution\n"
+                    "```"
                 )
-            # 3. Document analysis & diagramming
-            if "mandatory document" in sys_lower or any(k in user_lower for k in [".pdf", ".docx", "deciphered word document", "deciphered pdf document"]):
-                content_text = (
-                    "### Executive Summary\n"
-                    "Comprehensive synthesis of the provided document highlights key strategic initiatives, governance controls, and operational benchmarks.\n\n"
-                    "### Key Document Highlights & Policies\n"
-                    "- **Core Strategy**: Multi-agent verification protocols established across all production deployment layers.\n"
-                    "- **Risk Controls**: Deterministic Tier 0 sanity checks and multi-agent consensus mandated before execution.\n"
-                    "- **Performance Target**: Maintain sub-second routing with complete SQLite checkpointing.\n\n"
-                    "### Document Architecture Diagram\n"
+            elif any(k in user_lower or k in sys_lower for k in [".pdf", ".docx", ".doc", "document"]):
+                chart_code = (
                     "```mermaid\n"
                     "graph TD\n"
-                    "    A[Document Intake] --> B[Multi-Tier Verification]\n"
-                    "    B --> C[Audit Review]\n"
-                    "    C --> D[Approved Release]\n"
-                    "```\n\n"
-                    "### Strategic Takeaways\n"
-                    "1. Enforce documented compliance boundaries across all automated workflows.\n"
-                    "2. Implement regular audits against reference documentation standards."
+                    "    A[Intake] --> B[Processing] --> C[Completion]\n"
+                    "```"
                 )
-                return LLMResponse(
-                    content=content_text,
-                    thought="Synthesized document sections and created architectural Mermaid diagram.",
-                )
-
-            # 4. Photos & Image visual analysis
-            if "mandatory visual" in sys_lower or has_images or any(k in user_lower for k in ["visual image asset", ".png", ".jpg", ".jpeg", "visual photo"]):
-                content_text = (
-                    "### Executive Summary\n"
-                    "Visual analysis of the attached image/photo reveals structured workflow components, key relationships, and performance data.\n\n"
-                    "### Visual Observations & Feature Map\n"
-                    "- **Visual Clarity**: High-contrast layout with distinct process nodes and operational hierarchies.\n"
-                    "- **Key Focal Points**: Center workflow transitions connecting intake to verification and action execution.\n"
-                    "- **Metrics & Indicators**: Color-coded indicators confirm optimal system status.\n\n"
-                    "### Modeled Visual Architecture\n"
+            elif has_images or any(k in user_lower for k in ["image", "photo", ".png", ".jpg"]):
+                chart_code = (
                     "```mermaid\n"
                     "flowchart LR\n"
-                    "    VisualInput[Visual Media / Photo] --> FeatureExtraction[Feature & Layout Extraction]\n"
-                    "    FeatureExtraction --> DiagramModeling[Diagram Modeling]\n"
-                    "    DiagramModeling --> VerifiedOutput[Verified Chart Output]\n"
-                    "```\n\n"
-                    "### Strategic Takeaways\n"
-                    "1. Integrate multimodal vision analysis with deterministic verification pipelines.\n"
-                    "2. Generate visual Mermaid models for complex diagrammatic photo inputs."
+                    "    A[Image Input] --> B[Visual Analysis] --> C[Result]\n"
+                    "```"
                 )
-                return LLMResponse(
-                    content=content_text,
-                    thought="Analyzed visual image assets and generated Mermaid workflow diagram.",
+            else:
+                chart_code = (
+                    "```mermaid\n"
+                    "graph TD\n"
+                    "    A[Start] --> B[Execute] --> C[Finish]\n"
+                    "```"
                 )
+
+            return LLMResponse(
+                content=(
+                    f"### Executive Summary\n"
+                    f"Analysis completed for: {summary_title}\n\n"
+                    f"{chart_code}"
+                ),
+                thought=f"Generated mock chart response for: {summary_title}",
+            )
 
             return LLMResponse(
                 content=f"### Solution Strategy\nEngineered specialized resolution for task:\n- Input: {last_user[:60]}\n- Architecture verified.",
