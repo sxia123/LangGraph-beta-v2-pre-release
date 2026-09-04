@@ -275,12 +275,18 @@ def get_tool_checkpoints(
 
 
 def search_memories(query: str, limit: int = 50) -> list:
-    """Search memories by keyword match across event, input, result, or metadata."""
+    """Search memories by keyword match across event, input, result, or metadata.
+
+    First attempts exact phrase matching. If fewer than `limit` matches are found,
+    it falls back to tokenized keyword matching (filtering common stop words) so
+    natural language questions recall relevant context.
+    """
     if not query or not query.strip():
         return fetch_memories(limit=limit)
 
     conn = _get_conn()
-    pattern = f"%{query.strip()}%"
+    clean_q = query.strip()
+    pattern = f"%{clean_q}%"
     cur = conn.execute(
         """
         SELECT id, run_id, event, input, result, metadata, timestamp
@@ -290,7 +296,47 @@ def search_memories(query: str, limit: int = 50) -> list:
         """,
         (pattern, pattern, pattern, pattern, limit),
     )
-    rows = cur.fetchall()
+    rows = list(cur.fetchall())
+    seen_ids = {r[0] for r in rows}
+
+    # If exact phrase returned fewer than limit, tokenize for substantive keywords
+    if len(rows) < limit:
+        import re
+
+        stop_words = {
+            "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
+            "from", "with", "about", "into", "through", "during", "before", "after",
+            "above", "below", "to", "in", "for", "on", "by", "of", "at", "and", "or",
+            "the", "a", "an", "is", "was", "are", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "this", "that", "these", "those",
+            "tell", "show", "give", "please", "our", "earlier", "we", "you", "they",
+        }
+        tokens = [
+            w for w in re.findall(r"[A-Za-z0-9_.\-]+", clean_q.lower())
+            if len(w) >= 3 and w not in stop_words
+        ]
+        if tokens:
+            clauses = ["(event LIKE ? OR input LIKE ? OR result LIKE ? OR metadata LIKE ?)" for _ in tokens]
+            params = []
+            for tok in tokens:
+                p = f"%{tok}%"
+                params.extend([p, p, p, p])
+            remaining = limit - len(rows)
+            params.append(remaining * 2)
+            token_cur = conn.execute(
+                f"""
+                SELECT id, run_id, event, input, result, metadata, timestamp
+                FROM memories
+                WHERE {' OR '.join(clauses)}
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                tuple(params),
+            )
+            for tr in token_cur.fetchall():
+                if tr[0] not in seen_ids and len(rows) < limit:
+                    rows.append(tr)
+                    seen_ids.add(tr[0])
+
     out = []
     for r in rows:
         try:

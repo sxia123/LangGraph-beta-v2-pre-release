@@ -11,13 +11,39 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Union
 
-import docx
-import pptx
-import pypdfium2
+try:
+    import docx
+except ImportError:
+    docx = None
+
+try:
+    import pptx
+except ImportError:
+    pptx = None
+
+try:
+    import pypdfium2
+except ImportError:
+    pypdfium2 = None
 
 from src.core.spreadsheet_parser import decipher_spreadsheet
 
 logger = logging.getLogger("document_parser")
+
+_docling_converter: Any = None
+
+
+def _get_docling_converter() -> Any:
+    global _docling_converter
+    if _docling_converter is None:
+        try:
+            from docling.document_converter import DocumentConverter
+
+            _docling_converter = DocumentConverter()
+        except Exception as err:
+            logger.debug("Docling DocumentConverter unavailable: %s", err)
+            _docling_converter = False
+    return _docling_converter if _docling_converter is not False else None
 
 
 def _decode_source_to_bytes(source: Union[str, bytes]) -> tuple[Optional[bytes], Optional[str]]:
@@ -37,14 +63,21 @@ def _decode_source_to_bytes(source: Union[str, bytes]) -> tuple[Optional[bytes],
             logger.warning("Failed to decode base64 data URI: %s", err)
             return None, None
 
-    # Check if string is an existing file path
-    if os.path.isfile(source):
-        try:
-            with open(source, "rb") as f:
-                return f.read(), source
-        except Exception as err:
-            logger.warning("Failed to read file path %s: %s", source, err)
-            return None, source
+    # Check if string is an existing file path (handling root and sub-dir execution)
+    potential_paths = [
+        source,
+        os.path.join(os.getcwd(), source),
+        os.path.join(os.getcwd(), "LangGraph-beta-v2-pre-release", source),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), source),
+    ]
+    for p in potential_paths:
+        if os.path.isfile(p):
+            try:
+                with open(p, "rb") as f:
+                    return f.read(), p
+            except Exception as err:
+                logger.warning("Failed to read file path %s: %s", p, err)
+                return None, p
 
     # Try raw base64 decode if it appears to be base64
     clean = source.strip()
@@ -68,6 +101,15 @@ def parse_pdf(
     Returns a dict with 'ok', 'type', 'filename', 'page_count', 'extracted_text', and 'summary'.
     """
     fn = filename or "document.pdf"
+    if pypdfium2 is None:
+        return {
+            "ok": False,
+            "type": "document",
+            "filename": fn,
+            "error": "pypdfium2 is not installed in this Python environment. Run 'pip install pypdfium2' to enable PDF parsing.",
+            "extracted_text": "[PDF parsing unavailable: pypdfium2 not installed in this environment]",
+        }
+
     raw_bytes, path = _decode_source_to_bytes(source)
     if not raw_bytes:
         return {
@@ -131,7 +173,16 @@ def parse_docx(
 
     Returns a dict with 'ok', 'type', 'filename', 'extracted_text', and 'summary'.
     """
-    fn = filename or "document.docx"
+    fn = filename or (os.path.basename(source) if isinstance(source, str) and os.path.isfile(source) else "document.docx")
+    if docx is None:
+        return {
+            "ok": False,
+            "type": "document",
+            "filename": fn,
+            "error": "python-docx is not installed in this Python environment. Run 'pip install python-docx' to enable Word document parsing.",
+            "extracted_text": "[Word document parsing unavailable: python-docx not installed in this environment]",
+        }
+
     raw_bytes, path = _decode_source_to_bytes(source)
     if not raw_bytes:
         return {
@@ -141,6 +192,38 @@ def parse_docx(
             "error": "Unable to read DOCX source data.",
             "extracted_text": "",
         }
+
+    # 1. Try IBM Docling structured conversion first if available
+    converter = _get_docling_converter()
+    if converter is not None:
+        try:
+            conv_res = None
+            if path and os.path.isfile(path):
+                conv_res = converter.convert(path)
+            else:
+                from docling.datamodel.base_models import DocumentStream
+
+                ds = DocumentStream(name=fn, stream=io.BytesIO(raw_bytes))
+                conv_res = converter.convert(ds)
+
+            if conv_res and hasattr(conv_res, "document"):
+                md_content = conv_res.document.export_to_markdown()
+                full_content = (
+                    f"## Deciphered Word Document (via IBM Docling): {fn}\n\n"
+                    f"{md_content}"
+                )
+                return {
+                    "ok": True,
+                    "type": "document",
+                    "format": "docx",
+                    "parser": "docling",
+                    "filename": fn,
+                    "extracted_text": full_content,
+                    "deciphered_context": full_content,
+                    "summary": f"**Word Document**: `{fn}` (Structured conversion via IBM Docling)",
+                }
+        except Exception as docling_err:
+            logger.warning("Docling parse failed for %s, falling back to python-docx: %s", fn, docling_err)
 
     try:
         stream = io.BytesIO(raw_bytes) if not path else path
@@ -220,6 +303,15 @@ def parse_slideshow(
     Returns a dict with 'ok', 'type', 'filename', 'slide_count', 'extracted_text', and 'summary'.
     """
     fn = filename or "presentation.pptx"
+    if pptx is None:
+        return {
+            "ok": False,
+            "type": "slideshow",
+            "filename": fn,
+            "error": "python-pptx is not installed in this Python environment. Run 'pip install python-pptx' to enable PowerPoint parsing.",
+            "extracted_text": "[Presentation parsing unavailable: python-pptx not installed in this environment]",
+        }
+
     raw_bytes, path = _decode_source_to_bytes(source)
     if not raw_bytes:
         return {

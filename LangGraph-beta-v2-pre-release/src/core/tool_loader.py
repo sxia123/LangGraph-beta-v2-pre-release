@@ -131,18 +131,23 @@ class ToolLoader:
             description="Query ChromaDB vector memory for semantically relevant memory chunks.",
         )
 
-        # 10. File write (with automatic pre-file-change checkpointing)
+        # 10. File generation (creation of new files only, no overwriting/editing)
+        self.register(
+            "file_generate",
+            self._tool_file_write,
+            description="Generate a new file at file_path with content (cannot overwrite or edit existing files).",
+        )
         self.register(
             "file_write",
             self._tool_file_write,
-            description="Write or overwrite a file at file_path with content (automatically creates pre-change checkpoint).",
+            description="Generate a new file at file_path with content (cannot overwrite or edit existing files).",
         )
 
-        # 11. File edit (with automatic pre-file-change checkpointing)
+        # 11. File edit (disabled by policy)
         self.register(
             "file_edit",
             self._tool_file_edit,
-            description="Edit a file by finding and replacing a target substring (automatically creates pre-change checkpoint).",
+            description="[Disabled] Editing existing files is disabled by policy. Use file_generate to create new files.",
         )
 
         # 12. GitHub tools
@@ -255,7 +260,7 @@ class ToolLoader:
     def _tool_file_write(
         self, file_path: str, content: str, run_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Writes content to file_path with mandatory pre- and post-file-change checkpoints."""
+        """Generates a new file at file_path with mandatory pre- and post-creation checkpoints. Overwriting existing files is disabled."""
         try:
             from src.core.checkpointer import (
                 checkpoint_after_file_change,
@@ -263,10 +268,21 @@ class ToolLoader:
             )
 
             abs_path = os.path.abspath(file_path)
+            if os.path.exists(abs_path):
+                return {
+                    "ok": False,
+                    "message": (
+                        f"File generation error: '{file_path}' already exists. "
+                        "Modifying or overwriting existing files is disabled by policy. "
+                        "Please specify a new, unique file path."
+                    ),
+                    "returncode": None,
+                }
+
             pre_cp = checkpoint_before_file_change(
                 abs_path,
                 run_id=run_id,
-                metadata={"tool": "file_write", "action": "write"},
+                metadata={"tool": "file_write", "action": "create_new"},
             )
 
             os.makedirs(os.path.dirname(abs_path), exist_ok=True)
@@ -282,7 +298,7 @@ class ToolLoader:
 
             return {
                 "ok": True,
-                "message": f"File '{file_path}' written successfully ({len(content)} chars).",
+                "message": f"File '{file_path}' generated successfully ({len(content)} chars).",
                 "checkpoint_id": pre_cp["checkpoint_id"],
                 "post_checkpoint_id": post_cp["checkpoint_id"],
                 "returncode": 0,
@@ -293,54 +309,15 @@ class ToolLoader:
     def _tool_file_edit(
         self, file_path: str, target: str, replacement: str, run_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Edits an existing file by replacing target with replacement with mandatory checkpointing."""
-        try:
-            from src.core.checkpointer import (
-                checkpoint_after_file_change,
-                checkpoint_before_file_change,
-            )
-
-            abs_path = os.path.abspath(file_path)
-            if not os.path.isfile(abs_path):
-                return {"ok": False, "message": f"File '{file_path}' does not exist.", "returncode": None}
-
-            pre_cp = checkpoint_before_file_change(
-                abs_path,
-                run_id=run_id,
-                metadata={"tool": "file_edit", "action": "edit"},
-            )
-
-            with open(abs_path, "r", encoding="utf-8") as f:
-                current_text = f.read()
-
-            if target not in current_text:
-                return {
-                    "ok": False,
-                    "message": f"Target string not found in '{file_path}'.",
-                    "checkpoint_id": pre_cp["checkpoint_id"],
-                    "returncode": None,
-                }
-
-            new_text = current_text.replace(target, replacement)
-            with open(abs_path, "w", encoding="utf-8") as f:
-                f.write(new_text)
-
-            post_cp = checkpoint_after_file_change(
-                abs_path,
-                pre_checkpoint_id=pre_cp["checkpoint_id"],
-                run_id=run_id,
-                metadata={"tool": "file_edit"},
-            )
-
-            return {
-                "ok": True,
-                "message": f"File '{file_path}' edited successfully.",
-                "checkpoint_id": pre_cp["checkpoint_id"],
-                "post_checkpoint_id": post_cp["checkpoint_id"],
-                "returncode": 0,
-            }
-        except Exception as err:
-            return {"ok": False, "message": f"File edit error: {err}", "returncode": None}
+        """Edits an existing file - disabled by policy to prevent modifying existing files."""
+        return {
+            "ok": False,
+            "message": (
+                "File editing is disabled by policy. AI is permitted to generate new files, "
+                "but editing or modifying existing files is strictly restricted."
+            ),
+            "returncode": None,
+        }
 
     def _tool_math_eval(self, expression: str) -> Dict[str, Any]:
         try:

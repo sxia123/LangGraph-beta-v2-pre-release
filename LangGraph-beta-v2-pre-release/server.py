@@ -3,13 +3,14 @@ import logging
 import operator
 import os
 import queue as _queue
+import sys
 import threading as _threading
 import time
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
@@ -83,11 +84,12 @@ def create_direct_chat_graph(
             "Respond accurately, clearly, and concisely to user questions and images.\n\n"
             "Available Tools (imperative execution):\n"
             f"{tools.prompt_block()}\n\n"
-            "If the user asks you to perform a calculation, write/run Python code, search the web, lookup Wikipedia/ArXiv, "
+            "If the user asks you to perform a calculation, generate a new file, run Python code, search the web, lookup Wikipedia/ArXiv, "
             "convert documents, or use git, format your tool call as a JSON block:\n"
             "```json\n"
             '{"tool": "<tool_name>", "args": {<param_name>: <value>}}\n'
             "```\n"
+            "Policy: You are permitted to generate new files (via file_generate), but editing or modifying existing files is restricted.\n"
             "If no tool is required, respond directly with your helpful answer."
         )
 
@@ -1008,13 +1010,26 @@ def handle_chat_stream(req: ChatRequest):
         ) from err
 
 
-# Serve static files from public directory
+# Serve static files and favicon from public directory
 public_dir = os.path.join(os.path.dirname(__file__), "public")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    fav_path = os.path.join(public_dir, "favicon.svg")
+    if os.path.exists(fav_path):
+        return FileResponse(fav_path, media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="Favicon not found")
+
+
 if os.path.exists(public_dir):
     app.mount("/", StaticFiles(directory=public_dir, html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
 
+    server_dir = os.path.dirname(os.path.abspath(__file__))
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
     # Web UI server runs on port 8080 to avoid port conflict with oMLX server on port 8000
-    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True, app_dir=server_dir)

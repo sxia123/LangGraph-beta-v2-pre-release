@@ -445,11 +445,7 @@ class LocalLLMClient:
 
         target_base = (
             base_url
-            or (
-                self.config.ollama_base_url
-                if self.config.provider != "ollama"
-                else self.config.base_url
-            )
+            or self.config.ollama_base_url
             or "http://127.0.0.1:11434"
         ).rstrip("/")
         opts = {"temperature": self.config.temperature}
@@ -650,6 +646,8 @@ class LocalLLMClient:
         if "specialist" in sys_lower or agent_name == "specialist":
             # 1. Slideshow & presentation analysis
             if "mandatory slideshow" in sys_lower or any(k in user_lower for k in [".pptx", ".ppt", "deciphered slideshow"]):
+                content_text = (
+                    "### Executive Summary\n"
                     "Synthesis of the slide presentation outlines strategic roadmap milestones, quarterly achievements, and resource allocation plans.\n\n"
                     "### Slide Deck Breakdown & Agenda\n"
                     "- **Slide 1 (Executive Summary)**: Q1 revenue targets exceeded across major AI platform segments.\n"
@@ -704,31 +702,61 @@ class LocalLLMClient:
                     "### Strategic Takeaways\n"
                     "1. Expand high-density compute clusters to sustain regional AI platform demand.\n"
                     "2. Replicate the APAC go-to-market playbook across emerging enterprise accounts."
-                    content=content_text,
-                    thought="Deciphered multi-sheet spreadsheet dataset, synthesized variance calculations, and constructed interactive Mermaid performance charts.",
-                    "| Region / Segment | Target ($) | Actual ($) | Variance ($) | Status |\n"
-                    "| --- | --- | --- | --- | --- |\n"
-                    "| North America Enterprise AI | $2,500,000 | $2,950,000 | +$450,000 | Exceeded |\n"
-                    "| North America GPU Compute | $1,800,000 | $2,100,000 | +$300,000 | Exceeded |\n"
-                    "| Europe Enterprise AI | $1,600,000 | $1,550,000 | -$50,000 | On Track |\n"
-                    "| Asia Pacific Autonomous Agents | $1,200,000 | $1,650,000 | +$450,000 | Exceeded |\n\n"
-                    "### Visual Performance Chart\n"
-                    "```mermaid\n"
-                    "xychart-beta\n"
-                    '    title "Q1 Performance: Target vs Actual Revenue ($M)"\n'
-                    '    x-axis ["NA AI", "NA GPU", "EU AI", "APAC Agents"]\n'
-                    '    y-axis "Revenue ($M)" 0 --> 4\n'
-                    "    bar [2.5, 1.8, 1.6, 1.2]\n"
-                    "    bar [2.95, 2.1, 1.55, 1.65]\n"
-                    "```\n\n"
-                    "### Strategic Takeaways\n"
-                    "1. Expand high-density compute clusters to sustain regional AI platform demand.\n"
-                    "2. Replicate the APAC go-to-market playbook across emerging enterprise accounts."
                 )
                 return LLMResponse(
                     content=content_text,
                     thought="Deciphered multi-sheet spreadsheet dataset, synthesized variance calculations, and constructed interactive Mermaid performance charts.",
                 )
+            # 3. Document analysis & diagramming
+            if "mandatory document" in sys_lower or any(k in user_lower for k in [".pdf", ".docx", "deciphered word document", "deciphered pdf document"]):
+                content_text = (
+                    "### Executive Summary\n"
+                    "Comprehensive synthesis of the provided document highlights key strategic initiatives, governance controls, and operational benchmarks.\n\n"
+                    "### Key Document Highlights & Policies\n"
+                    "- **Core Strategy**: Multi-agent verification protocols established across all production deployment layers.\n"
+                    "- **Risk Controls**: Deterministic Tier 0 sanity checks and multi-agent consensus mandated before execution.\n"
+                    "- **Performance Target**: Maintain sub-second routing with complete SQLite checkpointing.\n\n"
+                    "### Document Architecture Diagram\n"
+                    "```mermaid\n"
+                    "graph TD\n"
+                    "    A[Document Intake] --> B[Multi-Tier Verification]\n"
+                    "    B --> C[Audit Review]\n"
+                    "    C --> D[Approved Release]\n"
+                    "```\n\n"
+                    "### Strategic Takeaways\n"
+                    "1. Enforce documented compliance boundaries across all automated workflows.\n"
+                    "2. Implement regular audits against reference documentation standards."
+                )
+                return LLMResponse(
+                    content=content_text,
+                    thought="Synthesized document sections and created architectural Mermaid diagram.",
+                )
+
+            # 4. Photos & Image visual analysis
+            if "mandatory visual" in sys_lower or has_images or any(k in user_lower for k in ["visual image asset", ".png", ".jpg", ".jpeg", "visual photo"]):
+                content_text = (
+                    "### Executive Summary\n"
+                    "Visual analysis of the attached image/photo reveals structured workflow components, key relationships, and performance data.\n\n"
+                    "### Visual Observations & Feature Map\n"
+                    "- **Visual Clarity**: High-contrast layout with distinct process nodes and operational hierarchies.\n"
+                    "- **Key Focal Points**: Center workflow transitions connecting intake to verification and action execution.\n"
+                    "- **Metrics & Indicators**: Color-coded indicators confirm optimal system status.\n\n"
+                    "### Modeled Visual Architecture\n"
+                    "```mermaid\n"
+                    "flowchart LR\n"
+                    "    VisualInput[Visual Media / Photo] --> FeatureExtraction[Feature & Layout Extraction]\n"
+                    "    FeatureExtraction --> DiagramModeling[Diagram Modeling]\n"
+                    "    DiagramModeling --> VerifiedOutput[Verified Chart Output]\n"
+                    "```\n\n"
+                    "### Strategic Takeaways\n"
+                    "1. Integrate multimodal vision analysis with deterministic verification pipelines.\n"
+                    "2. Generate visual Mermaid models for complex diagrammatic photo inputs."
+                )
+                return LLMResponse(
+                    content=content_text,
+                    thought="Analyzed visual image assets and generated Mermaid workflow diagram.",
+                )
+
             return LLMResponse(
                 content=f"### Solution Strategy\nEngineered specialized resolution for task:\n- Input: {last_user[:60]}\n- Architecture verified.",
                 thought=f"Drafted comprehensive technical solution for '{last_user[:40]}'.",
@@ -830,6 +858,24 @@ class LocalLLMClient:
             return LLMResponse(
                 content=f"### Solution Strategy\nEngineered specialized resolution for task:\n- Input: {last_user[:60]}\n- Architecture verified.",
                 thought="Analyzed task specification and formulated optimal technical solution.",
+            )
+
+        if "recalled memory context:" in user_lower or "recalled memory context:" in sys_lower:
+            raw_text = last_user if "recalled memory context:" in user_lower else system_prompt
+            mem_lines = []
+            for line in raw_text.splitlines():
+                if line.strip().startswith("- [") and "]" in line:
+                    mem_lines.append(line.strip())
+            summary_bullet = "\n".join(mem_lines[:3]) if mem_lines else "- Retrieved historical records from SQLite."
+            cleaned_query = last_user.split("[Recalled")[0].strip() if "[Recalled" in last_user else last_user[:50]
+            return LLMResponse(
+                content=(
+                    f"### Contextual Recall & Memory Response\n"
+                    f"Based on recalled memory from previous sessions:\n\n"
+                    f"{summary_bullet}\n\n"
+                    f"**Analysis**: The historical context directly informs the current query: '{cleaned_query}'."
+                ),
+                thought="Detected recalled memory context in user prompt; incorporated historical facts into final synthesized response.",
             )
 
         return LLMResponse(

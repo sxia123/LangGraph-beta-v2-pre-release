@@ -33,15 +33,20 @@ def decipher_spreadsheet(
                 raw_bytes = base64.b64decode(encoded)
             except Exception:
                 raw_bytes = None
-        elif os.path.isfile(source_str):
-            resolved_path = source_str
-            if not target_filename:
-                target_filename = os.path.basename(source_str)
-        elif os.path.isfile(os.path.join(os.getcwd(), source_str)):
-            resolved_path = os.path.join(os.getcwd(), source_str)
-            if not target_filename:
-                target_filename = os.path.basename(resolved_path)
         else:
+            potential_paths = [
+                source_str,
+                os.path.join(os.getcwd(), source_str),
+                os.path.join(os.getcwd(), "LangGraph-beta-v2-pre-release", source_str),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), source_str),
+            ]
+            for p in potential_paths:
+                if os.path.isfile(p):
+                    resolved_path = p
+                    if not target_filename:
+                        target_filename = os.path.basename(p)
+                    break
+        if not resolved_path:
             # Check if source_str is base64 string
             if len(source_str) > 32 and (len(source_str) % 4 == 0) and re.match(r"^[A-Za-z0-9+/=\r\n]+$", source_str):
                 try:

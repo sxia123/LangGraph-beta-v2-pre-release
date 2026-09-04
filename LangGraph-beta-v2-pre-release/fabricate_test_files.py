@@ -2,6 +2,7 @@
 
 import os
 
+import docx
 import openpyxl
 import pptx
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -263,10 +264,94 @@ def fabricate_pptx(filepath: str) -> None:
     print(f"Created PowerPoint presentation: {filepath}")
 
 
+def fabricate_docx(filepath: str) -> None:
+    """Fabricates a realistic enterprise Word document for testing Docling structured parsing."""
+    doc = docx.Document()
+
+    # Document Header
+    doc.add_heading("Enterprise Multi-Agent AI Platform", 0)
+    subtitle = doc.add_paragraph("Q1 2026 Technical Architecture, Media Ingestion & IBM Docling Verification Specification")
+    subtitle.italic = True
+
+    # Metadata Block
+    meta = doc.add_paragraph()
+    meta.add_run("Classification: ").bold = True
+    meta.add_run("Internal Engineering / Strict Confidential\n")
+    meta.add_run("Author: ").bold = True
+    meta.add_run("Principal Systems Architect\n")
+    meta.add_run("Release Version: ").bold = True
+    meta.add_run("v2.4.0-Production\n")
+    meta.add_run("Verification Engine: ").bold = True
+    meta.add_run("IBM Docling 2.121.0\n")
+
+    # Section 1
+    doc.add_heading("1. Executive Summary & Architecture", level=1)
+    doc.add_paragraph(
+        "The Enterprise Multi-Agent AI Platform provides an end-to-end framework for autonomous agent orchestration, "
+        "deterministic verification gates, and heterogeneous foreign document intake. In Q1 2026, the architecture "
+        "integrates IBM Docling as the primary structured parser to decipher rich documents including Word documents (.docx), "
+        "PDFs, and presentations into high-fidelity structured Markdown."
+    )
+    doc.add_paragraph(
+        "By enforcing strict Tier 0 integrity checks, Tier 0.5 web verification, Tier 1 multi-agent audit, and final sanity gates, "
+        "the platform ensures 100% verifiable outputs with full cryptographic SQLite audit trails."
+    )
+
+    # Section 2
+    doc.add_heading("2. Media Intake Subsystems & Parser Specifications", level=1)
+    doc.add_paragraph(
+        "The following operational matrix details the intake subsystems, target media types, parser engines, and latency SLAs:"
+    )
+
+    subsystems = [
+        ("Spreadsheet Ingestion", ".xlsx, .xlsm, .csv", "OpenPyXL Engine", "< 120ms", "Tier 0 Audit"),
+        ("Presentation Parser", ".pptx, .ppt", "Python-PPTX Engine", "< 250ms", "Tier 0.5 Gate"),
+        ("Structured Document Parser", ".docx, .doc, .pdf", "IBM Docling Engine", "< 180ms", "Tier 1 Gate"),
+        ("Visual Media Ingestion", ".png, .jpg, .webp", "Qwen 2.5-VL Vision", "< 450ms", "Tier 2 Audit"),
+        ("Sandboxed Tool Runtime", "Python, Terminal, Git", "Sandboxed Execution", "< 800ms", "Tier 2.5 Sanity"),
+    ]
+
+    table = doc.add_table(rows=1, cols=5)
+    hdr_cells = table.rows[0].cells
+    hdr_titles = ["Subsystem", "Formats", "Parser Engine", "Latency SLA", "Verification Gate"]
+    for i, title in enumerate(hdr_titles):
+        hdr_cells[i].text = title
+        hdr_cells[i].paragraphs[0].runs[0].bold = True
+
+    for item in subsystems:
+        row_cells = table.add_row().cells
+        for idx, val in enumerate(item):
+            row_cells[idx].text = val
+
+    # Section 3
+    doc.add_heading("3. Strategic Roadmap & Milestones", level=1)
+    doc.add_paragraph("Key strategic milestones for the current release cycle include:")
+    milestones = [
+        "Milestone 1: Complete integration of IBM Docling 2.x for high-precision table extraction and Markdown generation.",
+        "Milestone 2: Browser-based Playwright automated UI verification across Edge and Chromium headless runtimes.",
+        "Milestone 3: Local LLM inference acceleration via Qwen 3.5 9B with graceful fallbacks.",
+        "Milestone 4: Interactive Mermaid diagram synthesis for document workflows and pipeline topologies.",
+    ]
+    for m in milestones:
+        doc.add_paragraph(m, style="List Bullet")
+
+    # Section 4
+    doc.add_heading("4. Verification & Operational Sign-off", level=1)
+    doc.add_paragraph(
+        "All document ingestion pipelines and automated browser verification tests have completed with zero regressions. "
+        "System status: CERTIFIED OPERATIONAL."
+    )
+
+    doc.save(filepath)
+    print(f"Created Enterprise Word document: {filepath}")
+
+
 if __name__ == "__main__":
     xlsx_path = os.path.abspath("test_global_sales_q1_2026.xlsx")
     pptx_path = os.path.abspath("test_ai_product_roadmap_2026.pptx")
+    docx_path = os.path.abspath("test_enterprise_document_2026.docx")
 
     fabricate_xlsx(xlsx_path)
     fabricate_pptx(pptx_path)
+    fabricate_docx(docx_path)
 

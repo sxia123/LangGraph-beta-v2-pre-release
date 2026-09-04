@@ -405,13 +405,23 @@ def create_chart_pipeline_graph(
                 flags=re.IGNORECASE,
             )
             for cand in candidates:
-                cand_path = cand if os.path.isfile(cand) else os.path.join(os.getcwd(), cand)
-                if os.path.isfile(cand_path):
-                    parsed = decipher_media_file(cand_path, filename=cand)
+                cand_paths = [
+                    cand,
+                    os.path.join(os.getcwd(), cand),
+                    os.path.join(os.getcwd(), "LangGraph-beta-v2-pre-release", cand),
+                    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), cand),
+                ]
+                found_cand = None
+                for cp in cand_paths:
+                    if os.path.isfile(cp):
+                        found_cand = cp
+                        break
+                if found_cand:
+                    parsed = decipher_media_file(found_cand, filename=cand)
                     if parsed.get("ok"):
                         parsed_files.append(parsed)
                         if parsed.get("type") == "image":
-                            collected_images.append(cand_path)
+                            collected_images.append(found_cand)
                         break
 
         has_foreign = len(parsed_files) > 0 or len(collected_images) > 0

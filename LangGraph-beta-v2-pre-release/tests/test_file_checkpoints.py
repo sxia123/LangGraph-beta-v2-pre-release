@@ -155,36 +155,52 @@ def test_rollback_file_checkpoint_remove_new_file():
         assert not os.path.exists(new_file)
 
 
-def test_tool_loader_file_write_and_edit_checkpoints():
-    """Verify ToolLoader file_write and file_edit create pre-change checkpoints."""
+def test_tool_loader_file_generation_and_edit_restrictions():
+    """Verify ToolLoader allows file generation but strictly restricts editing and overwriting."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        test_file = os.path.join(tmpdir, "tool_managed_file.txt")
+        test_file = os.path.join(tmpdir, "new_generated_file.txt")
         tools = ToolLoader()
         run_id = "run_tool_loader_file_001"
 
-        # 1. file_write
+        # 1. file_generate (creation of new file succeeds)
         res = tools.run(
-            "file_write",
+            "file_generate",
             run_id=run_id,
             file_path=test_file,
-            content="Version 1.0 content\nLine 2\n",
+            content="Generated report v1.0\nLine 2\n",
         )
         assert res["ok"] is True
         assert os.path.exists(test_file)
 
-        # 2. file_edit
+        # 2. Attempting to overwrite/edit existing file via file_generate / file_write fails
+        overwrite_res = tools.run(
+            "file_generate",
+            run_id=run_id,
+            file_path=test_file,
+            content="Malicious overwrite content",
+        )
+        assert overwrite_res["ok"] is False
+        assert "already exists" in overwrite_res["message"]
+        assert "disabled by policy" in overwrite_res["message"]
+
+        # 3. file_edit is disabled by policy
         edit_res = tools.run(
             "file_edit",
             run_id=run_id,
             file_path=test_file,
-            target="Version 1.0",
-            replacement="Version 2.0",
+            target="v1.0",
+            replacement="v2.0",
         )
-        assert edit_res["ok"] is True
-        with open(test_file, "r", encoding="utf-8") as f:
-            assert "Version 2.0 content" in f.read()
+        assert edit_res["ok"] is False
+        assert "File editing is disabled by policy" in edit_res["message"]
 
-        # Check that checkpoints were recorded in memory
+        # Original content remains pristine and untouched
+        with open(test_file, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert "Generated report v1.0" in content
+            assert "Malicious overwrite" not in content
+
+        # Check that pre/post checkpoints were recorded for the file generation
         cps = get_file_checkpoints(file_path=test_file, run_id=run_id)
         assert len(cps) >= 2
 

@@ -593,6 +593,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function checkSendButtonState() {
+    updateSendButtonState();
+  }
+
+  function adjustTextareaHeight() {
+    autoResizeTextarea();
+  }
+
   async function pauseGeneration() {
     if (!isGenerating) return;
     if (activeAbortController) {
@@ -1396,8 +1404,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (['web_search', 'wikipedia', 'arxiv', 'web_scrape'].includes(toolName)) return 'search';
     if (['python_repl', 'math_eval'].includes(toolName)) return 'code';
     if (['doc_convert', 'docling_parse'].includes(toolName)) return 'docs';
-    if (['file_write', 'file_edit', 'vector_memory'].includes(toolName)) return 'files';
-    if (toolName.startsWith('github_')) return 'git';
+    if (['file_generate', 'file_write', 'file_edit', 'vector_memory'].includes(toolName)) return 'files';
     return 'other';
   }
 
@@ -1423,10 +1430,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (toolName === 'doc_convert') return '📄';
     if (toolName === 'docling_parse') return '📑';
     if (toolName === 'vector_memory') return '🧠';
-    if (toolName === 'file_write') return '✏️';
-    if (toolName === 'file_edit') return '📝';
+    if (toolName === 'file_generate' || toolName === 'file_write') return '✏️';
+    if (toolName === 'file_edit') return '🚫';
     if (toolName.startsWith('github_')) return '🐙';
-    return '⚙️';
+    return '🔧';
   }
 
   // Tab Switching
@@ -1508,13 +1515,13 @@ document.addEventListener('DOMContentLoaded', () => {
             chatTextarea.value = 'Look up LangGraph and agentic AI on Wikipedia.';
           } else if (t.name === 'arxiv') {
             chatTextarea.value = 'Search ArXiv for recent papers on multi-agent collaboration.';
-          } else if (t.name === 'file_write' || t.name === 'file_edit') {
-            chatTextarea.value = 'Create a new python file named summary_output.py with a hello world function.';
+          } else if (t.name === 'file_generate' || t.name === 'file_write') {
+            chatTextarea.value = 'Generate a new python file named report_generator.py with a summary function.';
+          } else if (t.name === 'file_edit') {
+            chatTextarea.value = 'Explain that file editing is restricted by policy and only file generation is allowed.';
           } else {
-            chatTextarea.value = `Please execute the ${t.name} tool.`;
+            chatTextarea.value = `Use ${t.name} to help answer questions.`;
           }
-          chatTextarea.focus();
-          adjustTextareaHeight();
           checkSendButtonState();
         }
       });
