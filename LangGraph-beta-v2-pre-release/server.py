@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import logging
 import operator
@@ -299,7 +301,6 @@ def stop_chat_stream(payload: Optional[ChatStopRequest] = None):
 def extract_file_text(filename: str, raw_content: str) -> str:
     """Extracts readable text/markdown from uploaded raw file content, data URI, or disk path."""
     raw_content = raw_content or ""
-    fn_lower = (filename or "").lower()
     decoded_bytes: Optional[bytes] = None
 
     if raw_content.startswith("data:"):
@@ -311,15 +312,15 @@ def extract_file_text(filename: str, raw_content: str) -> str:
         except Exception as err:
             logger.warning("Failed to decode data URI for %s: %s", filename, err)
     elif raw_content and not os.path.isfile(raw_content):
-        binary_extensions = (".xlsx", ".xls", ".xlsm", ".pdf", ".docx", ".pptx", ".zip", ".bin")
-        if fn_lower.endswith(binary_extensions):
+        # Only attempt raw base64 decode if the filename indicates a binary file
+        fn_binary = (filename or "").lower().endswith(
+            (".xlsx", ".xls", ".xlsm", ".docx", ".pptx", ".pdf", ".zip", ".bin")
+        )
+        if fn_binary:
             try:
                 import base64
-                import re
 
-                clean_b64 = raw_content.strip()
-                if len(clean_b64) > 32 and (len(clean_b64) % 4 == 0) and re.match(r"^[A-Za-z0-9+/=\r\n]+$", clean_b64):
-                    decoded_bytes = base64.b64decode(clean_b64)
+                decoded_bytes = base64.b64decode(raw_content)
             except Exception:
                 decoded_bytes = None
 
@@ -332,11 +333,11 @@ def extract_file_text(filename: str, raw_content: str) -> str:
     elif filename and os.path.isfile(os.path.join(os.getcwd(), filename)):
         disk_path = os.path.join(os.getcwd(), filename)
 
+    fn_lower = (filename or "").lower()
+
     # 1. Native Excel spreadsheet parsing (.xlsx, .xls, .xlsm)
     if fn_lower.endswith((".xlsx", ".xls", ".xlsm")):
         try:
-            import io
-
             import openpyxl
 
             wb = None
@@ -386,9 +387,6 @@ def extract_file_text(filename: str, raw_content: str) -> str:
     # 2. CSV / TSV spreadsheet parsing
     if fn_lower.endswith((".csv", ".tsv")):
         try:
-            import csv
-            import io
-
             csv_text = None
             if decoded_bytes is not None:
                 try:

@@ -1,13 +1,18 @@
-"""Root entrypoint to run server from repository root directory."""
+"""Root workspace entry point for LangGraph Multi-Agent Studio Server.
+
+Automatically delegates to the server module inside the nested project folder.
+"""
 import importlib.util
 import os
 import sys
 
-_sub_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "LangGraph-beta-v2-pre-release")
-if _sub_dir not in sys.path:
-    sys.path.insert(0, _sub_dir)
+PROJECT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "LangGraph-beta-v2-pre-release")
+if os.path.exists(PROJECT_DIR):
+    if PROJECT_DIR not in sys.path:
+        sys.path.insert(0, PROJECT_DIR)
+    os.chdir(PROJECT_DIR)
 
-_inner_server_path = os.path.join(_sub_dir, "server.py")
+_inner_server_path = os.path.join(PROJECT_DIR, "server.py")
 if os.path.isfile(_inner_server_path):
     _spec = importlib.util.spec_from_file_location("server", _inner_server_path)
     if _spec and _spec.loader:
@@ -19,4 +24,5 @@ if os.path.isfile(_inner_server_path):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True, app_dir=_sub_dir)
+    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True, app_dir=PROJECT_DIR)
+

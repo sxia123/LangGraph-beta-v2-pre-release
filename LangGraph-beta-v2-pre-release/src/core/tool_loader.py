@@ -8,9 +8,13 @@ Agents (graph nodes) get a `ToolLoader` instance and can:
 """
 
 import inspect
+import io
+import logging
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class Tool:
@@ -110,11 +114,31 @@ class ToolLoader:
             description="Fetch and extract readable text content from a given URL via BeautifulSoup.",
         )
 
-        # 7. Document conversion to Markdown (MarkItDown)
+        # 7. Document conversion & file reading to Markdown
         self.register(
             "doc_convert",
             self._tool_doc_convert,
-            description="Convert Office documents (DOCX, PPTX, XLSX), PDFs, or HTML into clean Markdown.",
+            description="Convert Office documents (DOCX, PPTX, XLSX), spreadsheets, CSV, PDFs, or HTML into clean Markdown.",
+        )
+        self.register(
+            "read_file",
+            self._tool_doc_convert,
+            description="Read the contents of a local file (code, text, Excel spreadsheets, CSV, PDF, Markdown).",
+        )
+        self.register(
+            "file_read",
+            self._tool_doc_convert,
+            description="Read the contents of a local file (code, text, Excel spreadsheets, CSV, PDF, Markdown).",
+        )
+        self.register(
+            "read_excel",
+            self._tool_doc_convert,
+            description="Read and parse an Excel spreadsheet (.xlsx, .xls, .xlsm, .csv) into structured Markdown tables.",
+        )
+        self.register(
+            "read_document",
+            self._tool_doc_convert,
+            description="Read and convert documents (Word, PowerPoint, Excel, PDF) into readable text.",
         )
 
         # 8. Docling document parser
@@ -375,68 +399,145 @@ class ToolLoader:
             return {"ok": False, "message": f"Web scrape error: {err}", "returncode": None}
 
     def _tool_doc_convert(self, file_path: str) -> Dict[str, Any]:
+        clean_path = str(file_path or "").strip().strip("'\"")
+        if not clean_path:
+            return {"ok": False, "message": "No file path provided to doc_convert.", "returncode": None}
+
+        # Resolve relative paths against working directory
+        if not clean_path.startswith("data:") and not os.path.isabs(clean_path):
+            candidate = os.path.join(os.getcwd(), clean_path)
+            if os.path.isfile(candidate):
+                clean_path = candidate
+
+        fn_lower = clean_path.lower()
+        decoded_bytes: Optional[bytes] = None
+        if clean_path.startswith("data:"):
+            try:
+                import base64
+
+                _header, encoded = clean_path.split(",", 1)
+                decoded_bytes = base64.b64decode(encoded)
+            except Exception:
+                decoded_bytes = None
+
         try:
             # 1. Native Excel spreadsheet parsing (.xlsx, .xls, .xlsm)
-            if file_path.lower().endswith((".xlsx", ".xls", ".xlsm")):
+            if fn_lower.endswith((".xlsx", ".xls", ".xlsm")) or (
+                decoded_bytes and "spreadsheet" in clean_path[:60].lower()
+            ):
                 try:
                     import openpyxl
 
-                    wb = openpyxl.load_workbook(file_path, data_only=True)
-                    md_sheets = []
-                    for sheet_name in wb.sheetnames:
-                        ws = wb[sheet_name]
-                        rows = list(ws.iter_rows(values_only=True))
-                        if not rows:
-                            continue
-                        header = [str(c if c is not None else "") for c in rows[0]]
-                        md_table = [
-                            f"### Sheet: {sheet_name}",
-                            "",
-                            "| " + " | ".join(header) + " |",
-                            "| " + " | ".join(["---"] * len(header)) + " |",
-                        ]
-                        for row in rows[1:]:
-                            if any(c is not None for c in row):
-                                cells = [str(c if c is not None else "") for c in row]
+                    wb = None
+                    if decoded_bytes is not None:
+                        wb = openpyxl.load_workbook(io.BytesIO(decoded_bytes), data_only=True)
+                    elif os.path.isfile(clean_path):
+                        wb = openpyxl.load_workbook(clean_path, data_only=True)
+
+                    if wb:
+                        md_sheets = []
+                        for sheet_name in wb.sheetnames:
+                            ws = wb[sheet_name]
+                            rows = list(ws.iter_rows(values_only=True))
+                            if not rows:
+                                continue
+                            header = [
+                                str(c if c is not None else "").replace("\n", " ").replace("|", "\\|")
+                                for c in rows[0]
+                            ]
+                            md_table = [
+                                f"### Sheet: {sheet_name}",
+                                "",
+                                "| " + " | ".join(header) + " |",
+                                "| " + " | ".join(["---"] * max(1, len(header))) + " |",
+                            ]
+                            row_limit = 150
+                            data_rows = [r for r in rows[1:] if any(c is not None for c in r)]
+                            for row in data_rows[:row_limit]:
+                                cells = [
+                                    str(c if c is not None else "").replace("\n", " ").replace("|", "\\|")
+                                    for c in row
+                                ]
                                 md_table.append("| " + " | ".join(cells) + " |")
-                        md_sheets.append("\n".join(md_table))
-                    if md_sheets:
-                        return {"ok": True, "message": "\n\n".join(md_sheets)[:16000], "returncode": 0}
-                except Exception:
-                    pass
+                            if len(data_rows) > row_limit:
+                                md_table.append(
+                                    f"\n*... ({len(data_rows) - row_limit} additional rows omitted for token budget)*"
+                                )
+                            md_sheets.append("\n".join(md_table))
+                        if md_sheets:
+                            return {"ok": True, "message": "\n\n".join(md_sheets)[:16000], "returncode": 0}
+                except Exception as ex_err:
+                    logger.warning("Error reading Excel in tool_loader: %s", ex_err)
 
             # 2. CSV / TSV spreadsheet parsing
-            if file_path.lower().endswith((".csv", ".tsv")):
+            if fn_lower.endswith((".csv", ".tsv")):
                 try:
                     import csv
 
-                    delim = "\t" if file_path.lower().endswith(".tsv") else ","
-                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                        reader = list(csv.reader(f, delimiter=delim))
-                    if reader:
-                        header = [str(c) for c in reader[0]]
-                        md_table = [
-                            "| " + " | ".join(header) + " |",
-                            "| " + " | ".join(["---"] * len(header)) + " |",
-                        ]
-                        for row in reader[1:]:
-                            md_table.append("| " + " | ".join(str(c) for c in row) + " |")
-                        return {"ok": True, "message": "\n".join(md_table)[:16000], "returncode": 0}
-                except Exception:
-                    pass
+                    csv_text = None
+                    if decoded_bytes is not None:
+                        csv_text = decoded_bytes.decode("utf-8", errors="replace")
+                    elif os.path.isfile(clean_path):
+                        with open(clean_path, "r", encoding="utf-8", errors="replace") as f:
+                            csv_text = f.read()
 
-            # 3. MarkItDown converter
-            from markitdown import MarkItDown
+                    if csv_text:
+                        delim = "\t" if fn_lower.endswith(".tsv") else ","
+                        reader = list(csv.reader(io.StringIO(csv_text), delimiter=delim))
+                        if reader:
+                            header = [
+                                str(c).replace("\n", " ").replace("|", "\\|") for c in reader[0]
+                            ]
+                            md_table = [
+                                "| " + " | ".join(header) + " |",
+                                "| " + " | ".join(["---"] * max(1, len(header))) + " |",
+                            ]
+                            row_limit = 150
+                            for row in reader[1:row_limit]:
+                                cells = [
+                                    str(c).replace("\n", " ").replace("|", "\\|") for c in row
+                                ]
+                                md_table.append("| " + " | ".join(cells) + " |")
+                            if len(reader) - 1 > row_limit:
+                                md_table.append(
+                                    f"\n*... ({len(reader) - 1 - row_limit} additional rows omitted for token budget)*"
+                                )
+                            return {"ok": True, "message": "\n".join(md_table)[:16000], "returncode": 0}
+                except Exception as csv_err:
+                    logger.warning("Error reading CSV in tool_loader: %s", csv_err)
 
-            md = MarkItDown()
-            res = md.convert(file_path)
-            return {"ok": True, "message": res.text_content[:8000], "returncode": 0}
-        except Exception as err:
+            # 3. Optional MarkItDown converter
             try:
-                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                    return {"ok": True, "message": f.read()[:8000], "returncode": 0}
+                from markitdown import MarkItDown
+
+                md = MarkItDown()
+                res = md.convert(clean_path)
+                return {"ok": True, "message": res.text_content[:8000], "returncode": 0}
             except Exception:
-                return {"ok": False, "message": f"Document conversion error: {err}", "returncode": None}
+                pass
+
+            # 4. Plain text / source code reading fallback
+            is_binary = fn_lower.endswith(
+                (".xlsx", ".xls", ".xlsm", ".docx", ".pptx", ".pdf", ".zip", ".bin")
+            )
+            if is_binary:
+                return {
+                    "ok": False,
+                    "message": f"Unable to parse binary document '{clean_path}'. Please verify the file format.",
+                    "returncode": 1,
+                }
+
+            if os.path.isfile(clean_path):
+                with open(clean_path, "r", encoding="utf-8", errors="replace") as f:
+                    return {"ok": True, "message": f.read()[:8000], "returncode": 0}
+
+            return {
+                "ok": False,
+                "message": f"File not found: '{clean_path}'",
+                "returncode": 1,
+            }
+        except Exception as err:
+            return {"ok": False, "message": f"Document conversion error: {err}", "returncode": None}
 
     def _tool_docling_parse(self, file_path: str) -> Dict[str, Any]:
         try:
