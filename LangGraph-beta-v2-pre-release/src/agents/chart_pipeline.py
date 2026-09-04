@@ -1,10 +1,13 @@
 import operator
+import os
+import re
 import time
 from typing import Annotated, Any, Dict, List, Optional
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from src.core.document_parser import decipher_media_file
 from src.core.local_llm import LocalLLMClient
 from src.core.soul_loader import load_soul
 from src.core.tool_loader import get_tool_loader
@@ -49,6 +52,14 @@ class ChartPipelineState(TypedDict, total=False):
     # Run tracking (SQLite memory store)
     run_id: str
     run_started_at: str
+
+    # Foreign File Ingestion & Routing
+    files: Optional[List[Dict[str, Any]]]
+    images: Optional[List[str]]
+    has_foreign_file: bool
+    foreign_file_type: Optional[str]
+    spreadsheet_context: Optional[str]
+    spreadsheet_metadata: Optional[Dict[str, Any]]
 
 
 def _get_input(state: ChartPipelineState) -> str:
@@ -114,8 +125,25 @@ def create_chart_pipeline_graph(
             actual_query = str(query_or_state)
             curr_state = state if isinstance(state, dict) else {}
 
+        # Sanitize query: strip attachment blocks, sheet dumps, and pipe tables
+        clean_query = actual_query
+        if "--- File Attachment:" in clean_query:
+            clean_query = clean_query.split("--- File Attachment:")[0].strip()
+        if "### Sheet:" in clean_query:
+            clean_query = clean_query.split("### Sheet:")[0].strip()
+        if "## Deciphered Spreadsheet" in clean_query:
+            clean_query = clean_query.split("## Deciphered Spreadsheet")[0].strip()
+        clean_query = re.sub(r"\|.*\|", "", clean_query)
+        clean_query = " ".join(clean_query.split()).strip()
+
+        if not clean_query or len(clean_query) < 3:
+            clean_query = "enterprise spreadsheet data analysis chart"
+
+        if len(clean_query) > 150:
+            clean_query = clean_query[:150].rsplit(" ", 1)[0]
+
         res = _execute_tool_with_checkpoint(
-            curr_state, "web_search", query=actual_query, max_results=max_results, max_chars=max_chars
+            curr_state, "web_search", query=clean_query, max_results=max_results, max_chars=max_chars
         )
         if res.get("ok"):
             return str(res.get("message", ""))
@@ -127,8 +155,10 @@ def create_chart_pipeline_graph(
         agent_name: str,
         model_name: Optional[str] = None,
         max_tokens: int = 4096,
+        images: Optional[List[str]] = None,
     ) -> tuple[str, Optional[str], List[Dict[str, Any]]]:
         """Executes LLM completion with tool calling capabilities and automatic SQLite checkpointing."""
+        effective_images = images if images is not None else state.get("images")
         res = llm_client.generate_completion(
             prompt,
             messages=[],
@@ -136,6 +166,7 @@ def create_chart_pipeline_graph(
             max_tokens=max_tokens,
             agent=agent_name,
             model_name=model_name,
+            images=effective_images,
         )
         node_thoughts: List[Dict[str, Any]] = []
         if res.thought:
@@ -266,6 +297,8 @@ def create_chart_pipeline_graph(
             "goals": goals,
             "run_id": run_id,
             "run_started_at": run_started_at,
+            "images": state.get("images") or [],
+            "files": state.get("files") or [],
             "messages": [msg],
             "agent_thoughts": [
                 {
@@ -300,6 +333,292 @@ def create_chart_pipeline_graph(
             "timestamp": time.strftime("%H:%M:%S"),
         }
         return {"current_step": "blocked_end", "final_response": "Request blocked during intake.", "messages": [msg]}
+
+    # 1.5. FOREIGN FILE ROUTER NODE
+    def foreign_file_router_node(state: ChartPipelineState) -> Dict[str, Any]:
+        """Inspects task and state for foreign files (spreadsheets, documents, slideshows, photos/images).
+
+        If found, deciphers the workbook/document/slideshow/image and flags has_foreign_file = True.
+        Else flags has_foreign_file = False to keep with the original pipeline.
+        """
+        task = _get_input(state)
+        collected_images: List[str] = list(state.get("images") or [])
+        raw_files = state.get("files") or []
+        messages = state.get("messages") or []
+        if messages and isinstance(messages[-1], dict):
+            last_msg = messages[-1]
+            if not raw_files and last_msg.get("files"):
+                raw_files = last_msg.get("files")
+            if last_msg.get("images"):
+                for img in last_msg.get("images"):
+                    if img and img not in collected_images:
+                        collected_images.append(img)
+
+        parsed_files = []
+        if raw_files:
+            for f in raw_files:
+                if isinstance(f, dict):
+                    fn = f.get("filename", "")
+                    content = f.get("content") or f.get("text") or ""
+                    fn_lower = fn.lower()
+                    if fn_lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg")) or str(content).startswith("data:image/"):
+                        if content and content not in collected_images:
+                            collected_images.append(content)
+                        parsed_files.append({
+                            "ok": True,
+                            "type": "image",
+                            "filename": fn,
+                            "summary": f"**Visual Image**: `{fn}`",
+                            "deciphered_context": f"## Visual Image Asset: {fn}\nAttached image for visual inspection and architectural charting.",
+                        })
+                    elif fn_lower.endswith((".xlsx", ".xls", ".xlsm", ".csv", ".tsv", ".pdf", ".docx", ".doc", ".pptx", ".ppt")):
+                        parsed = decipher_media_file(content, filename=fn)
+                        if parsed.get("ok"):
+                            parsed_files.append(parsed)
+
+        # Check for embedded file attachment blocks (e.g. from server.py)
+        if not parsed_files and "--- File Attachment:" in task:
+            matches = re.findall(
+                r"--- File Attachment:\s*([^\n]+)\s*---\n([\s\S]*?)\n--- End File ---", task
+            )
+            for fn, f_body in matches:
+                clean_fn = fn.strip()
+                fn_lower = clean_fn.lower()
+                if fn_lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg")):
+                    parsed_files.append({
+                        "ok": True,
+                        "type": "image",
+                        "filename": clean_fn,
+                        "summary": f"**Visual Image**: `{clean_fn}`",
+                        "deciphered_context": f"## Visual Image Asset: {clean_fn}\nAttached image for visual inspection and architectural charting.",
+                    })
+                elif fn_lower.endswith((".xlsx", ".xls", ".xlsm", ".csv", ".tsv", ".pdf", ".docx", ".doc", ".pptx", ".ppt")):
+                    parsed = decipher_media_file(f_body.strip(), filename=clean_fn)
+                    if parsed.get("ok"):
+                        parsed_files.append(parsed)
+
+        # Check for media file path mentions in prompt
+        if not parsed_files:
+            candidates = re.findall(
+                r"[\w\-\.]+\.(?:xlsx|xls|xlsm|csv|tsv|pdf|docx|doc|pptx|ppt|png|jpg|jpeg|webp|gif|svg)",
+                task,
+                flags=re.IGNORECASE,
+            )
+            for cand in candidates:
+                cand_path = cand if os.path.isfile(cand) else os.path.join(os.getcwd(), cand)
+                if os.path.isfile(cand_path):
+                    parsed = decipher_media_file(cand_path, filename=cand)
+                    if parsed.get("ok"):
+                        parsed_files.append(parsed)
+                        if parsed.get("type") == "image":
+                            collected_images.append(cand_path)
+                        break
+
+        has_foreign = len(parsed_files) > 0 or len(collected_images) > 0
+
+        if has_foreign:
+            types = [p.get("type") for p in parsed_files if p.get("type")]
+            if "spreadsheet" in types:
+                primary_type = "spreadsheet"
+            elif "slideshow" in types:
+                primary_type = "slideshow"
+            elif "document" in types:
+                primary_type = "document"
+            elif collected_images or "image" in types:
+                primary_type = "image"
+            else:
+                primary_type = "file"
+
+            contexts = [p["deciphered_context"] for p in parsed_files if p.get("deciphered_context")]
+            if collected_images and not contexts:
+                contexts.append(f"## Visual Photo / Image Input\nAttached {len(collected_images)} image(s) for visual inspection, diagramming, and charting.")
+            elif collected_images:
+                contexts.append(f"## Visual Attachments\nAttached {len(collected_images)} image(s) available for multimodal inspection.")
+            combined_context = "\n\n".join(contexts)
+
+            media_filenames = [p.get("filename") for p in parsed_files if p.get("filename")]
+            if not media_filenames and collected_images:
+                media_filenames = [f"image_{i+1}.png" for i in range(len(collected_images))]
+
+            spreadsheet_metadata = {
+                "files": media_filenames,
+                "primary_type": primary_type,
+                "has_images": bool(collected_images),
+                "image_count": len(collected_images),
+                "sheet_names": [s for p in parsed_files for s in p.get("sheet_names", [])],
+                "metrics": {p.get("filename", ""): p.get("metrics", {}) for p in parsed_files if "metrics" in p},
+            }
+            msg = {
+                "id": f"msg_router_{int(time.time() * 1000)}",
+                "sender": "Foreign File Router",
+                "role": "assistant",
+                "content": (
+                    f"### Foreign File Route Activated ({primary_type.capitalize()})\n"
+                    f"- Detected {len(media_filenames)} media/data file(s): {', '.join(media_filenames)}\n"
+                    f"- Routing to specialized {primary_type} deciphering & visual charting workflow."
+                ),
+                "timestamp": time.strftime("%H:%M:%S"),
+            }
+            return {
+                "has_foreign_file": True,
+                "foreign_file_type": primary_type,
+                "spreadsheet_context": combined_context,
+                "spreadsheet_metadata": spreadsheet_metadata,
+                "images": collected_images,
+                "current_step": "foreign_file_routed",
+                "messages": [msg],
+                "agent_thoughts": [
+                    {
+                        "agent": "Foreign File Router",
+                        "thought": f"Foreign file/media detected (type={primary_type}, files={media_filenames}, images={len(collected_images)}). Routing to specialized deciphering pipeline.",
+                        "timestamp": time.strftime("%H:%M:%S"),
+                    }
+                ],
+            }
+        else:
+            return {
+                "has_foreign_file": False,
+                "foreign_file_type": None,
+                "spreadsheet_context": None,
+                "spreadsheet_metadata": None,
+                "images": collected_images,
+                "current_step": "original_pipeline_routed",
+                "agent_thoughts": [
+                    {
+                        "agent": "Foreign File Router",
+                        "thought": "No foreign file or image detected in input. Keeping with the original pipeline.",
+                        "timestamp": time.strftime("%H:%M:%S"),
+                    }
+                ],
+            }
+
+    # 1.6. SPREADSHEET & MEDIA SPECIALIST NODE (for foreign file path)
+    def spreadsheet_specialist_node(state: ChartPipelineState) -> Dict[str, Any]:
+        task = _get_input(state)
+        spreadsheet_context = state.get("spreadsheet_context") or ""
+        foreign_file_type = state.get("foreign_file_type") or "spreadsheet"
+
+        soul_prompt = load_soul("specialist", fallback_prompt="You are the Lead Specialist Agent.")
+
+        if foreign_file_type == "document":
+            reqs = (
+                "MANDATORY DOCUMENT ANALYSIS & VISUALIZATION REQUIREMENTS:\n"
+                "1. Synthesize the provided document: extract key sections, critical facts, embedded tables, and takeaways.\n"
+                "2. Present a structured Executive Summary with core insights and data highlights.\n"
+                "3. Include at least one visual Mermaid diagram (e.g. ```mermaid ... ``` code block using flowchart, mindmap, timeline, or chart) illustrating document architecture, process flow, or key statistics.\n"
+                "4. Structure the response with clear headings, organized tables, and actionable conclusions."
+            )
+        elif foreign_file_type == "slideshow":
+            reqs = (
+                "MANDATORY SLIDESHOW & PRESENTATION ANALYSIS REQUIREMENTS:\n"
+                "1. Synthesize the presentation slide deck: outline slide progression, bullet points, speaker notes, and embedded metrics.\n"
+                "2. Present a structured Executive Summary of the presentation narrative and strategic roadmap.\n"
+                "3. Include at least one visual Mermaid diagram (e.g. ```mermaid ... ``` code block using timeline, gantt, flowchart, or xychart-beta) visualizing the presentation roadmap or metrics.\n"
+                "4. Structure the response with organized slide takeaways, tabular summaries, and recommendations."
+            )
+        elif foreign_file_type == "image":
+            reqs = (
+                "MANDATORY VISUAL & IMAGE ANALYSIS REQUIREMENTS:\n"
+                "1. Analyze the attached visual photo, screenshot, or diagram in detail: identify visual components, layouts, text, and visual data.\n"
+                "2. Present a comprehensive analysis describing visual features, structure, and findings.\n"
+                "3. Include at least one visual Mermaid diagram (e.g. ```mermaid ... ``` code block) modeling the architecture, workflow, or visual relationships depicted in the image.\n"
+                "4. Structure the response with clear headings, organized observations, and key takeaways."
+            )
+        else:
+            reqs = (
+                "MANDATORY SPREADSHEET ANALYSIS & VISUALIZATION REQUIREMENTS:\n"
+                "1. Decipher the provided spreadsheet data: identify key metrics, variances, totals, and cross-sheet comparisons.\n"
+                "2. Present a structured Executive Summary with high-priority business findings and financial/operational KPIs.\n"
+                "3. Include at least one visual Mermaid chart (e.g. ```mermaid ... ``` code block using xychart-beta, bar chart, pie chart, or flowchart) illustrating the core data metrics.\n"
+                "4. Structure the response with clear headings, organized markdown tables, and strategic takeaways."
+            )
+
+        prompt = f"""{soul_prompt}
+
+Task: "{task}"
+
+{spreadsheet_context}
+
+Available Tools:
+{tools.prompt_block()}
+
+{reqs}"""
+
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="specialist", max_tokens=4096, images=state.get("images")
+        )
+
+        msg = {
+            "id": f"msg_spec_{int(time.time() * 1000)}",
+            "sender": "Specialist Agent (Local AI)",
+            "role": "assistant",
+            "content": f"### Specialist Solution Draft (Local AI)\n\n{content}",
+            "timestamp": time.strftime("%H:%M:%S"),
+        }
+
+        return {
+            "specialist_output": content,
+            "current_step": "spreadsheet_specialist_complete",
+            "messages": [msg],
+            "agent_thoughts": thoughts or [
+                {
+                    "agent": "Specialist Agent",
+                    "thought": raw_thought or f"Formulated {foreign_file_type} deciphering and visual chart draft.",
+                    "timestamp": time.strftime("%H:%M:%S"),
+                }
+            ],
+        }
+
+    # 1.7. SPREADSHEET & MEDIA VERIFY NODE (audits against reference context rather than web search)
+    def spreadsheet_verify_node(state: ChartPipelineState) -> Dict[str, Any]:
+        task = _get_input(state)
+        soul_prompt = load_soul("tier1_verifier", fallback_prompt="You are the Media & Data Verification Auditor.")
+        spreadsheet_context = state.get("spreadsheet_context") or ""
+
+        prompt = f"""{soul_prompt}
+
+Task: "{task}"
+
+Output to Audit:
+{state.get("specialist_output", "")}
+
+Reference Context:
+{spreadsheet_context}
+
+Available Tools:
+{tools.prompt_block()}
+
+MANDATORY AUDIT CRITERIA:
+Verify that the specialist output accurately reflects the provided reference data (spreadsheet, document, slideshow, or image), calculations, and visual charts.
+Do NOT flag reference figures or document details as unverified simply because they are private local data not present in web search.
+Respond with VERIFIED if findings match the reference data, or REVISION REQUIRED if discrepancies exist."""
+
+        content, raw_thought, thoughts = _run_node_with_tools(
+            state, prompt, agent_name="tier1_verifier", max_tokens=4096
+        )
+        is_verified = "VERIFIED" in content.upper() or "APPROVED" in content.upper()
+
+        msg = {
+            "id": f"msg_ss_verify_{int(time.time() * 1000)}",
+            "sender": "Spreadsheet Verification Node",
+            "role": "assistant",
+            "content": f"### Spreadsheet Verification\n**Status**: {'VERIFIED' if is_verified else 'REVISION REQUIRED'}\n\n{content}",
+            "timestamp": time.strftime("%H:%M:%S"),
+        }
+
+        return {
+            "tier1_verified": is_verified,
+            "tier1_result": content,
+            "is_converged": is_verified,
+            "messages": [msg],
+            "agent_thoughts": thoughts or [
+                {
+                    "agent": "Spreadsheet Auditor",
+                    "thought": raw_thought or f"Spreadsheet audit complete. Verified = {is_verified}.",
+                    "timestamp": time.strftime("%H:%M:%S"),
+                }
+            ],
+        }
 
     # 2. SPECIALIST NODE (Local AI)
     def specialist_node(state: ChartPipelineState) -> Dict[str, Any]:
@@ -513,17 +832,25 @@ MANDATORY: Produce a REVISED draft that resolves every discrepancy or correction
             state, prompt, agent_name="specialist", max_tokens=4096
         )
 
+        revised_text = content.strip()
+        if (
+            len(revised_text) < 150
+            and ("VERIFIED" in revised_text.upper() or "APPROVED" in revised_text.upper())
+            and len(draft) > len(revised_text)
+        ):
+            revised_text = draft
+
         msg = {
             "id": f"msg_rev_{int(time.time() * 1000)}",
             "sender": "Revisions Node",
             "role": "assistant",
-            "content": f"### Revised Draft (post Tier 1 feedback)\n\n{content}",
+            "content": f"### Revised Draft (post Tier 1 feedback)\n\n{revised_text}",
             "timestamp": time.strftime("%H:%M:%S"),
         }
 
         return {
-            "revised_output": content,
-            "specialist_output": content,
+            "revised_output": revised_text,
+            "specialist_output": revised_text,
             "messages": [msg],
             "agent_thoughts": thoughts or [
                 {
@@ -677,9 +1004,26 @@ Repair the draft solution, ensuring all factual claims are verified and clearly 
             "final_verifier",
             fallback_prompt="You are the Final Answer Verifier.",
         )
-        search_context = _search_context(task, max_results=5, max_chars=16000)
+        spreadsheet_context = state.get("spreadsheet_context")
 
-        prompt = f"""{soul_prompt}
+        if spreadsheet_context:
+            prompt = f"""{soul_prompt}
+
+Task: "{task}"
+
+Candidate Final Answer:
+{solution}
+
+Reference Spreadsheet Context:
+{spreadsheet_context}
+
+Available Tools:
+{tools.prompt_block()}
+
+Review the candidate answer for correctness against the provided spreadsheet data, ensuring metrics and charts are accurate. Respond with a short rationale and end with either VERIFIED or REJECTED."""
+        else:
+            search_context = _search_context(task, max_results=5, max_chars=16000)
+            prompt = f"""{soul_prompt}
 
 Available Tools:
 {tools.prompt_block()}
@@ -1026,7 +1370,17 @@ Repair the rejected final answer, correcting every inaccuracy and filling gaps. 
     def route_intake(state: ChartPipelineState) -> str:
         if state.get("intake_status") == "BLOCKED":
             return "blocked_end"
+        return "foreign_file_router"
+
+    def route_foreign_file(state: ChartPipelineState) -> str:
+        if state.get("has_foreign_file"):
+            return "spreadsheet_specialist"
         return "specialist"
+
+    def route_spreadsheet_verify(state: ChartPipelineState) -> str:
+        if state.get("tier1_verified"):
+            return "final_verification"
+        return "revisions"
 
     def route_tier2(state: ChartPipelineState) -> str:
         if state.get("tier2_verified"):
@@ -1046,6 +1400,9 @@ Repair the rejected final answer, correcting every inaccuracy and filling gaps. 
     # BUILD GRAPH
     workflow.add_node("intake", intake_node)
     workflow.add_node("blocked_end", blocked_end_node)
+    workflow.add_node("foreign_file_router", foreign_file_router_node)
+    workflow.add_node("spreadsheet_specialist", spreadsheet_specialist_node)
+    workflow.add_node("spreadsheet_verify", spreadsheet_verify_node)
     workflow.add_node("specialist", specialist_node)
     workflow.add_node("tier0_checks", tier0_checks_node)
     workflow.add_node("tier05_web_verify", tier05_web_verify_node)
@@ -1065,10 +1422,26 @@ Repair the rejected final answer, correcting every inaccuracy and filling gaps. 
     # EDGES
     workflow.add_edge(START, "intake")
     workflow.add_conditional_edges(
-        "intake", route_intake, {"specialist": "specialist", "blocked_end": "blocked_end"}
+        "intake", route_intake, {"foreign_file_router": "foreign_file_router", "blocked_end": "blocked_end"}
     )
     workflow.add_edge("blocked_end", END)
 
+    # Conditional router: if foreign file detected -> new path, else -> original pipeline
+    workflow.add_conditional_edges(
+        "foreign_file_router",
+        route_foreign_file,
+        {"spreadsheet_specialist": "spreadsheet_specialist", "specialist": "specialist"},
+    )
+
+    # New Foreign File Branch
+    workflow.add_edge("spreadsheet_specialist", "spreadsheet_verify")
+    workflow.add_conditional_edges(
+        "spreadsheet_verify",
+        route_spreadsheet_verify,
+        {"final_verification": "final_verification", "revisions": "revisions"},
+    )
+
+    # Original Pipeline Branch (100% preserved)
     workflow.add_edge("specialist", "tier0_checks")
     workflow.add_edge("tier0_checks", "tier05_web_verify")
     workflow.add_edge("tier05_web_verify", "tier1_verify")
