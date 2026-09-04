@@ -2,7 +2,6 @@ import csv
 import io
 import json
 import logging
-import logging
 import operator
 import os
 import queue as _queue
@@ -65,8 +64,6 @@ class DirectChatState(TypedDict, total=False):
     final_response: str
     agent_thoughts: Annotated[List[Dict[str, Any]], operator.add]
     run_id: Optional[str]
-    images: Optional[List[str]]
-    files: Optional[List[Dict[str, Any]]]
 
 
 def create_direct_chat_graph(
@@ -78,7 +75,7 @@ def create_direct_chat_graph(
     def direct_chat_node(state: DirectChatState) -> Dict[str, Any]:
         messages = state.get("messages", [])
         last_user = messages[-1] if messages else {}
-        images = state.get("images") or last_user.get("images") or []
+        images = last_user.get("images") or []
         run_id = state.get("run_id")
 
         tool_prompt = (
@@ -300,7 +297,6 @@ def stop_chat_stream(payload: Optional[ChatStopRequest] = None):
 def extract_file_text(filename: str, raw_content: str) -> str:
     """Extracts readable text/markdown from uploaded raw file content, data URI, or disk path."""
     raw_content = raw_content or ""
-    fn_lower = (filename or "").lower()
     decoded_bytes: Optional[bytes] = None
 
     if raw_content.startswith("data:"):
@@ -312,15 +308,15 @@ def extract_file_text(filename: str, raw_content: str) -> str:
         except Exception as err:
             logger.warning("Failed to decode data URI for %s: %s", filename, err)
     elif raw_content and not os.path.isfile(raw_content):
-        binary_extensions = (".xlsx", ".xls", ".xlsm", ".pdf", ".docx", ".pptx", ".zip", ".bin")
-        if fn_lower.endswith(binary_extensions):
+        # Only attempt raw base64 decode if the filename indicates a binary file
+        fn_binary = (filename or "").lower().endswith(
+            (".xlsx", ".xls", ".xlsm", ".docx", ".pptx", ".pdf", ".zip", ".bin")
+        )
+        if fn_binary:
             try:
                 import base64
-                import re
 
-                clean_b64 = raw_content.strip()
-                if len(clean_b64) > 32 and (len(clean_b64) % 4 == 0) and re.match(r"^[A-Za-z0-9+/=\r\n]+$", clean_b64):
-                    decoded_bytes = base64.b64decode(clean_b64)
+                decoded_bytes = base64.b64decode(raw_content)
             except Exception:
                 decoded_bytes = None
 
@@ -332,6 +328,8 @@ def extract_file_text(filename: str, raw_content: str) -> str:
         disk_path = filename
     elif filename and os.path.isfile(os.path.join(os.getcwd(), filename)):
         disk_path = os.path.join(os.getcwd(), filename)
+
+    fn_lower = (filename or "").lower()
 
     # 1. Native Excel spreadsheet parsing (.xlsx, .xls, .xlsm)
     if fn_lower.endswith((".xlsx", ".xls", ".xlsm")):
@@ -385,9 +383,6 @@ def extract_file_text(filename: str, raw_content: str) -> str:
     # 2. CSV / TSV spreadsheet parsing
     if fn_lower.endswith((".csv", ".tsv")):
         try:
-            import csv
-            import io
-
             csv_text = None
             if decoded_bytes is not None:
                 try:
@@ -420,51 +415,6 @@ def extract_file_text(filename: str, raw_content: str) -> str:
                     return "\n".join(md_table)
         except Exception as err:
             logger.warning("Error parsing CSV/TSV %s: %s", filename, err)
-
-    # 3. PDF Document parsing (.pdf)
-    if fn_lower.endswith(".pdf"):
-        try:
-            from src.core.document_parser import parse_pdf
-
-            source_val = decoded_bytes or disk_path or raw_content
-            res = parse_pdf(source_val, filename=filename)
-            if res.get("ok") and res.get("extracted_text"):
-                return res.get("extracted_text")
-            logger.warning("PDF parse issue for %s: %s", filename, res.get("summary"))
-        except Exception as err:
-            logger.warning("Error parsing PDF %s: %s", filename, err)
-
-    # 4. Word Document parsing (.docx, .doc)
-    if fn_lower.endswith((".docx", ".doc")):
-        try:
-            from src.core.document_parser import parse_docx
-
-            source_val = decoded_bytes or disk_path or raw_content
-            res = parse_docx(source_val, filename=filename)
-            if res.get("ok") and res.get("extracted_text"):
-                return res.get("extracted_text")
-            logger.warning("DOCX parse issue for %s: %s", filename, res.get("summary"))
-        except Exception as err:
-            logger.warning("Error parsing DOCX %s: %s", filename, err)
-
-    # 5. PowerPoint Slideshow parsing (.pptx, .ppt)
-    if fn_lower.endswith((".pptx", ".ppt")):
-        try:
-            from src.core.document_parser import parse_slideshow
-
-            source_val = decoded_bytes or disk_path or raw_content
-            res = parse_slideshow(source_val, filename=filename)
-            if res.get("ok") and res.get("extracted_text"):
-                return res.get("extracted_text")
-            logger.warning("PPTX parse issue for %s: %s", filename, res.get("summary"))
-        except Exception as err:
-            logger.warning("Error parsing PPTX %s: %s", filename, err)
-
-    # 6. Photos & Images (.png, .jpg, .jpeg, .webp, .gif, .bmp, .svg)
-    if fn_lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg")) or (
-        raw_content.startswith("data:image/")
-    ):
-        return f"[Image / Photo Attachment: {filename}]"
 
     if decoded_bytes is not None:
         try:
@@ -792,23 +742,13 @@ def handle_chat_stream(req: ChatRequest):
             },
         )
 
-        effective_images = list(req.images or [])
-        if req.files:
-            for f in req.files:
-                if isinstance(f, dict):
-                    fn = (f.get("filename") or "").lower()
-                    cnt = f.get("content") or f.get("text") or ""
-                    if fn.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg")) or cnt.startswith("data:image/"):
-                        if cnt and cnt not in effective_images:
-                            effective_images.append(cnt)
-
         user_message_entry = {
             "id": user_msg_id,
             "sender": "User",
             "role": "user",
             "content": effective_prompt,
             "timestamp": timestamp,
-            "images": effective_images,
+            "images": req.images or [],
             "files": req.files or [],
         }
 
@@ -819,8 +759,6 @@ def handle_chat_stream(req: ChatRequest):
                 "user_input": effective_prompt,
                 "final_response": "",
                 "agent_thoughts": [],
-                "images": effective_images,
-                "files": req.files or [],
             }
         elif pipeline_choice in ["chart", "chart_pipeline"]:
             initial_input = {
@@ -829,8 +767,6 @@ def handle_chat_stream(req: ChatRequest):
                 "user_input": effective_prompt,
                 "current_step": "intake",
                 "agent_thoughts": [],
-                "images": effective_images,
-                "files": req.files or [],
             }
         elif pipeline_choice in ["code_review", "code"]:
             initial_input = {
@@ -1017,6 +953,5 @@ if os.path.exists(public_dir):
 if __name__ == "__main__":
     import uvicorn
 
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True, app_dir=app_dir)
-
+    # Web UI server runs on port 8080 to avoid port conflict with oMLX server on port 8000
+    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=True)
